@@ -15,6 +15,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import argparse
+import copy
+
 
 import logging
 from datetime import datetime
@@ -1475,6 +1477,39 @@ class ESExecutor:
         # Add DOS-style switches from query
         cmd.extend(dos_switches)
 
+        # Use DIR-style sorting for reliability (based on test results)
+        has_sort_switch = any(
+            sw.startswith("/o") or "-sort" in sw for sw in dos_switches
+        )
+
+        if not has_sort_switch:
+            if options.sort_field == SortMode.NAME:
+                sort_flag = "/on" if options.sort_ascending else "/o-n"
+            elif options.sort_field == SortMode.SIZE:
+                sort_flag = "/os" if options.sort_ascending else "/o-s"
+            elif options.sort_field == SortMode.DATE_MODIFIED:
+                sort_flag = "/od" if options.sort_ascending else "/o-d"
+            elif options.sort_field == SortMode.EXTENSION:
+                sort_flag = "/oe" if options.sort_ascending else "/o-e"
+            elif options.sort_field == SortMode.PATH:
+                # Path doesn't have a DIR-style equivalent, use -sort syntax
+                cmd.extend(["-sort", "path"])
+                if not options.sort_ascending:
+                    cmd.extend(["-sort-descending"])
+                sort_flag = None
+            elif options.sort_field == SortMode.ATTRIBUTES:
+                cmd.extend(["-sort", "attributes"])
+                if not options.sort_ascending:
+                    cmd.extend(["-sort-descending"])
+                sort_flag = None
+            else:
+                # Default to name
+                sort_flag = "/on" if options.sort_ascending else "/o-n"
+
+            if sort_flag:
+                cmd.append(sort_flag)
+                logging.debug(f"Using DIR-style sort: {sort_flag}")
+
         # Modes (but don't override if already specified in query)
         if not any(sw in dos_switches for sw in ["-regex", "-r"]):
             if options.mode == SearchMode.REGEX:
@@ -1499,39 +1534,44 @@ class ESExecutor:
         ):
             cmd.extend(["-diacritics"])
 
-        # Sort (don't override if /o specified in query)
-        if not any(sw.startswith("/o") for sw in dos_switches):
-            cmd.extend(["-sort", options.sort_field.value])
-            if not options.sort_ascending:
-                cmd.extend(["-sort-descending"])
-
         # Limits / offset
-        if options.max_results > 0 and not any(
+        max_results_specified = any(
             "-max-results" in str(sw) or "-n" in str(sw) for sw in dos_switches
-        ):
+        )
+        if options.max_results > 0 and not max_results_specified:
             cmd.extend(["-max-results", str(options.max_results)])
-        if options.offset > 0 and not any(
+
+        offset_specified = any(
             "-offset" in str(sw) or "-o" in str(sw) for sw in dos_switches
-        ):
+        )
+        if options.offset > 0 and not offset_specified:
             cmd.extend(["-offset", str(options.offset)])
 
-        # Columns
+        # Columns - always specify these for consistent output
         columns = ["-name"]
         if options.show_size:
             columns.append("-size")
         if options.show_date_modified:
             columns.append("-date-modified")
-        columns.append("-path-column")
+        if options.show_date_created:
+            columns.append("-date-created")
+        if options.show_date_accessed:
+            columns.append("-date-accessed")
+        if options.show_attributes:
+            columns.append("-attributes")
+        if options.show_extension:
+            columns.append("-extension")
+        columns.append("-path-column")  # directory only; we'll join with name
         cmd.extend(columns)
 
         # Stable machine-readable output
         cmd.extend(["-csv", "-no-header"])
 
         # Filters (but don't duplicate file/folder filters from query)
-        has_file_folder_filter = (
-            any(sw in dos_switches for sw in ["/ad", "/a-d"])
-            or "files_only" in str(dos_switches)
-            or "folders_only" in str(dos_switches)
+        has_file_folder_filter = any(
+            sw in dos_switches for sw in ["/ad", "/a-d"]
+        ) or any(
+            "files_only" in str(sw) or "folders_only" in str(sw) for sw in dos_switches
         )
 
         if not has_file_folder_filter:
@@ -1552,6 +1592,10 @@ class ESExecutor:
             cmd.extend(["-size-format", str(options.size_format)])
         if options.date_format != 0:
             cmd.extend(["-date-format", str(options.date_format)])
+
+        # Highlight (only for console output, not CSV)
+        # if options.highlight:
+        #     cmd.extend(["-highlight"])
 
         if options.timeout > 0:
             cmd.extend(["-timeout", str(options.timeout)])
@@ -1614,25 +1658,16 @@ class ESExecutor:
         return search_terms, switches
 
     def execute_search(self, options: SearchOptions) -> Tuple[List[SearchResult], str]:
+        # First try ES sorting
         cmd = self.build_command(options)
 
-        # Log the complete command being executed
         logging.debug(f"Executing ES command: {' '.join(cmd)}")
         logging.debug(f"Query string: '{options.query}'")
-        logging.debug(f"Working directory: {os.getcwd()}")
 
         try:
-            logging.debug("Starting subprocess...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
             logging.debug(f"ES process completed with return code: {result.returncode}")
-            logging.debug(f"ES stdout length: {len(result.stdout)} characters")
-            logging.debug(f"ES stderr: '{result.stderr.strip()}'")
-
-            if result.stdout:
-                # Log first few lines of output for debugging
-                lines = result.stdout.split("\n")[:5]
-                logging.debug(f"ES stdout sample: {lines}")
 
             if result.returncode != 0:
                 error_msg = f"ES returned error code {result.returncode}"
@@ -1642,8 +1677,16 @@ class ESExecutor:
                 return [], error_msg
 
             results = self._parse_output(result.stdout, options)
-            logging.debug(f"Parsed {len(results)} results from ES output")
-            return results, ""
+
+            # Verify ES sorting worked, fall back to Python if needed
+            if results:
+                sorted_results = self._verify_and_fix_sorting(results, options)
+                logging.debug(
+                    f"Final results: {len(sorted_results)} (ES + Python verification)"
+                )
+                return sorted_results, ""
+            else:
+                return [], ""
 
         except subprocess.TimeoutExpired:
             logging.error("ES search timed out after 30 seconds")
@@ -1655,21 +1698,142 @@ class ESExecutor:
             logging.error(f"Unexpected error executing ES: {e}", exc_info=True)
             return [], f"Error executing search: {str(e)}"
 
+    def _verify_and_fix_sorting(
+        self, results: List[SearchResult], options: SearchOptions
+    ) -> List[SearchResult]:
+        """Verify ES sorting worked, apply Python sorting if needed."""
+        if len(results) < 2:
+            return results
+
+        # Check if ES sorting actually worked
+        es_sorted_correctly = self._check_es_sorting(results, options)
+
+        if es_sorted_correctly:
+            logging.debug(f"ES sorting verified correct for {options.sort_field.value}")
+            return results
+        else:
+            logging.debug(
+                f"ES sorting failed verification, applying Python sort for {options.sort_field.value}"
+            )
+            return self._python_sort_results(results, options)
+
+    def _check_es_sorting(
+        self, results: List[SearchResult], options: SearchOptions
+    ) -> bool:
+        """Check if results are actually sorted as requested."""
+        if len(results) < 2:
+            return True
+
+        # Sample first few results to check sorting
+        sample_size = min(5, len(results))
+
+        for i in range(sample_size - 1):
+            current = results[i]
+            next_item = results[i + 1]
+
+            # Get comparison values
+            if options.sort_field == SortMode.NAME:
+                curr_val = current.filename.lower()
+                next_val = next_item.filename.lower()
+            elif options.sort_field == SortMode.SIZE:
+                curr_val = current.size
+                next_val = next_item.size
+            elif options.sort_field == SortMode.DATE_MODIFIED:
+                curr_val = self._parse_date(current.date_modified)
+                next_val = self._parse_date(next_item.date_modified)
+            elif options.sort_field == SortMode.PATH:
+                curr_val = os.path.dirname(current.full_path).lower()
+                next_val = os.path.dirname(next_item.full_path).lower()
+            elif options.sort_field == SortMode.EXTENSION:
+                curr_val = os.path.splitext(current.filename)[1].lower()
+                next_val = os.path.splitext(next_item.filename)[1].lower()
+            else:
+                continue
+
+            # Check sort order
+            if options.sort_ascending:
+                if curr_val > next_val:
+                    logging.debug(
+                        f"Sort verification failed: {curr_val} > {next_val} (should be ascending)"
+                    )
+                    return False
+            else:
+                if curr_val < next_val:
+                    logging.debug(
+                        f"Sort verification failed: {curr_val} < {next_val} (should be descending)"
+                    )
+                    return False
+
+        return True
+
+    def _python_sort_results(
+        self, results: List[SearchResult], options: SearchOptions
+    ) -> List[SearchResult]:
+        """Sort results using Python as fallback."""
+        try:
+
+            def get_sort_key(result: SearchResult):
+                if options.sort_field == SortMode.NAME:
+                    return result.filename.lower()
+                elif options.sort_field == SortMode.SIZE:
+                    return result.size
+                elif options.sort_field == SortMode.DATE_MODIFIED:
+                    return self._parse_date(result.date_modified)
+                elif options.sort_field == SortMode.PATH:
+                    return os.path.dirname(result.full_path).lower()
+                elif options.sort_field == SortMode.EXTENSION:
+                    return os.path.splitext(result.filename)[1].lower()
+                else:
+                    return result.filename.lower()
+
+            sorted_results = sorted(
+                results, key=get_sort_key, reverse=not options.sort_ascending
+            )
+            logging.debug(
+                f"Python sorting applied: {options.sort_field.value} {'ascending' if options.sort_ascending else 'descending'}"
+            )
+            return sorted_results
+
+        except Exception as e:
+            logging.error(f"Python sorting failed: {e}", exc_info=True)
+            return results
+
+    def _parse_date(self, date_str: str) -> datetime:
+        """Parse date string to datetime for proper sorting."""
+        if not date_str:
+            return datetime.min
+
+        try:
+            # Handle es.exe format: "28/08/2025 13:05"
+            return datetime.strptime(date_str, "%d/%m/%Y %H:%M")
+        except ValueError:
+            try:
+                # Fallback format
+                return datetime.strptime(date_str, "%d/%m/%Y")
+            except ValueError:
+                logging.debug(f"Could not parse date: {date_str}")
+                return datetime.min
+
     def _parse_output(self, output: str, options: SearchOptions) -> List[SearchResult]:
         import csv, io, os
 
         results: List[SearchResult] = []
-
-        # Our build_command orders columns as:
-        #  name, [size], [date-modified], path
         reader = csv.reader(io.StringIO(output))
+
+        # Expected column order we emit in build_command():
+        # name, [size], [date-modified], [extension], path-column
+        # (the bracketed ones appear only if the option is enabled)
         for row in reader:
             if not row:
                 continue
+
             i = 0
-            name = row[i].strip()
+
+            # 1) name
+            name = row[i].strip() if i < len(row) else ""
             i += 1
 
+            # 2) size (optional)
             size = 0
             if options.show_size and i < len(row):
                 try:
@@ -1678,15 +1842,30 @@ class ESExecutor:
                     size = 0
                 i += 1
 
+            # 3) date modified (optional)
             date_modified = ""
             if options.show_date_modified and i < len(row):
                 date_modified = row[i].strip()
                 i += 1
 
-            path = row[i].strip() if i < len(row) else ""
-            full_path = os.path.join(path, name) if path else name
+            # 4) extension (optional)
+            # Everything returns extension with a leading dot (e.g. ".pdf")
+            extension = ""
+            if getattr(options, "show_extension", True) and i < len(row):
+                # Only consume if we *actually* asked for it in the command
+                # (Your build_command appends -extension when show_extension is True)
+                extension = row[i].strip().lower()
+                i += 1
 
-            # Determine folder/file (best-effort; Everything may return stale paths)
+            # 5) path column (directory)
+            path_dir = row[i].strip() if i < len(row) else ""
+            full_path = os.path.join(path_dir, name) if path_dir else name
+
+            # If extension wasn't requested, derive it from the filename
+            if not extension:
+                extension = os.path.splitext(name)[1].lower()
+
+            # Best-effort folder flag (Everything output can be stale; guard for speed)
             is_folder = os.path.isdir(full_path) if os.path.exists(full_path) else False
 
             results.append(
@@ -1695,9 +1874,20 @@ class ESExecutor:
                     full_path=full_path,
                     size=size,
                     date_modified=date_modified,
+                    extension=extension,
                     is_folder=is_folder,
                 )
             )
+
+        # (Nice-to-have) small diagnostic like before
+        if results:
+            sizes = [r.size for r in results[:5]]
+            dates = [r.date_modified for r in results[:5]]
+            exts = [r.extension for r in results[:5]]
+            logging.debug(f"First 5 result sizes: {sizes}")
+            logging.debug(f"First 5 result dates: {dates}")
+            logging.debug(f"First 5 result extensions: {exts}")
+
         return results
 
     def export_results(
@@ -1748,7 +1938,8 @@ class ESTUI:
         self.result_offset = 0
         self.status_message = "Ready"
         self.search_active = False
-        self.current_focus = "search"  # "search" or "results"
+        self.current_focus = "search"  # "search", "headers", or "results"
+        self.current_header_col = 0  # Which header column is selected
         self.debug_mode = debug  # The state variable to toggle
         self.verbose = verbose
         self.debug_log = []  # Store debug messages
@@ -2271,8 +2462,12 @@ class ESTUI:
         # Draw results
         self.draw_results()
 
-        # Draw help line
-        help_text = "F1:Help F2:Options F3:Export F4:Advanced F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode F9:Debug F10:Quit Tab:Switch ESC:Search"
+        # Draw context-sensitive help line
+        if self.current_focus == "headers":
+            help_text = "←→:Select Column Enter:Sort ↓:Results Tab:Search ESC:Search"
+        else:
+            help_text = "F1:Help F2:Options F3:Export F4:Advanced F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode F9:Debug F10:Quit Tab:Switch ESC:Search"
+
         self.stdscr.addstr(
             self.height - 2, 0, help_text[: self.width - 1], self.colors.INFO
         )
@@ -2281,6 +2476,20 @@ class ESTUI:
         result_count = len(self.results)
         if result_count > 0:
             status = f"Found {result_count} results | Selected: {self.current_result + 1}/{result_count}"
+            if self.current_focus == "headers":
+                # Show which column is selected
+                header_names = []
+                if getattr(self.options, "show_icons", True):
+                    header_names.append("Icon")
+                header_names.extend(["Name"])
+                if getattr(self.options, "show_size", False):
+                    header_names.append("Size")
+                if getattr(self.options, "show_date_modified", False):
+                    header_names.append("Modified")
+                header_names.append("Path")
+
+                if 0 <= self.current_header_col < len(header_names):
+                    status += f" | Header: {header_names[self.current_header_col]}"
         else:
             status = self.status_message
 
@@ -2425,13 +2634,33 @@ class ESTUI:
         # ----- Draw headers -----
         header_y = results_start_y - 1
         x_pos = left_pad
-        for header, width in zip(headers, widths):
+        for i, (header, width) in enumerate(zip(headers, widths)):
+            # Determine header attribute
+            if self.current_focus == "headers" and i == self.current_header_col:
+                attr = self.colors.SELECTED
+            else:
+                attr = self.colors.HEADER
+
+            # Add sort indicator to current sort column
+            display_header = header
+            if header == "Name" and self.options.sort_field == SortMode.NAME:
+                display_header += " ↑" if self.options.sort_ascending else " ↓"
+            elif header == "Size" and self.options.sort_field == SortMode.SIZE:
+                display_header += " ↑" if self.options.sort_ascending else " ↓"
+            elif (
+                header == "Modified"
+                and self.options.sort_field == SortMode.DATE_MODIFIED
+            ):
+                display_header += " ↑" if self.options.sort_ascending else " ↓"
+            elif header == "Path" and self.options.sort_field == SortMode.PATH:
+                display_header += " ↑" if self.options.sort_ascending else " ↓"
+
             safe_addstr(
                 self.stdscr,
                 header_y,
                 x_pos,
-                header.ljust(width)[:width],
-                self.colors.HEADER,
+                display_header.ljust(width)[:width],
+                attr,
             )
             x_pos += width + 1
 
@@ -2584,41 +2813,35 @@ class ESTUI:
             logging.debug(f"Current focus: {self.current_focus}")
 
         try:
-            # Global shortcuts
+            # Global shortcuts (work from any focus mode)
             if key == curses.KEY_F1 or key == ord("?"):
-                if self.debug_mode:
-                    logging.debug("F1/? pressed - showing help")
                 self.show_help()
             elif key == curses.KEY_F2 or key == 15:  # F2 or Ctrl+O
-                if self.debug_mode:
-                    logging.debug("F2/Ctrl+O pressed - showing options")
                 self.show_options()
             elif key == curses.KEY_F3 or key == 5:  # F3 or Ctrl+E
-                if self.debug_mode:
-                    logging.debug("F3/Ctrl+E pressed - export results")
                 self.export_results()
             elif key == curses.KEY_F4:
                 self.show_advanced_search()
                 return
             elif key == curses.KEY_F5 or key == 18:  # F5 or Ctrl+R
-                if self.debug_mode:
-                    logging.debug("F5/Ctrl+R pressed - perform search")
                 self.perform_search()
-            elif key == curses.KEY_F7:  # toggle show icons
+            elif key == curses.KEY_F6 or key in (ord("x"), ord("X")):
+                self.show_exif_metadata()
+            elif key == curses.KEY_F7:
                 self.options.show_icons = not self.options.show_icons
                 self.draw_interface()
                 return
-            elif key == curses.KEY_F8:  # toggle unicode/ascii
+            elif key == curses.KEY_F8:
                 self.options.use_unicode_icons = not self.options.use_unicode_icons
                 self.draw_interface()
                 return
-            elif key == curses.KEY_F9:  # Toggle debug mode
+            elif key == curses.KEY_F9:
                 self.debug_mode = not self.debug_mode
                 if self.debug_mode:
-                    logging.basicConfig(level=logging.DEBUG)  # Reactivate debug logging
+                    logging.basicConfig(level=logging.DEBUG)
                     logging.debug("Debug mode activated by F9.")
                 else:
-                    logging.basicConfig(level=logging.INFO)  # Deactivate debug logging
+                    logging.basicConfig(level=logging.INFO)
                     logging.info("Debug mode deactivated by F9.")
                 self.draw_interface()
                 return
@@ -2639,6 +2862,8 @@ class ESTUI:
             # Context-specific shortcuts
             elif self.current_focus == "search":
                 self.handle_search_input(key)
+            elif self.current_focus == "headers":
+                self.handle_header_input(key)
             elif self.current_focus == "results":
                 self.handle_results_input(key)
 
@@ -2912,12 +3137,110 @@ class ESTUI:
         return
 
     def switch_focus(self):
-        """Switch focus between search field and results"""
+        """Switch focus between search field, headers, and results"""
         if self.current_focus == "search":
+            if self.results:  # Only switch to headers if we have results
+                self.current_focus = "headers"
+                self.current_header_col = 0
+            else:
+                self.current_focus = "search"  # Stay in search if no results
+        elif self.current_focus == "headers":
             self.current_focus = "results"
-        else:
+        else:  # results
             self.current_focus = "search"
         self.draw_interface()
+
+    def handle_header_input(self, key):
+        """Handle input when headers are focused"""
+        if not self.results:
+            self.switch_focus()  # Switch away if no results
+            return
+
+        # Build column list to match draw_results exactly
+        columns = []
+
+        # Icon column (if enabled)
+        if getattr(self.options, "show_icons", True):
+            columns.append(("", "icon"))
+
+        # Name column
+        columns.append(("Name", "name"))
+
+        # Size column (if enabled)
+        if getattr(self.options, "show_size", False):
+            columns.append(("Size", "size"))
+
+        # Date Modified column (if enabled)
+        if getattr(self.options, "show_date_modified", False):
+            columns.append(("Modified", "date_modified"))
+
+        # Path column
+        columns.append(("Path", "path"))
+
+        # Handle navigation
+        if key == curses.KEY_LEFT:
+            self.current_header_col = max(0, self.current_header_col - 1)
+            self.draw_interface()
+        elif key == curses.KEY_RIGHT:
+            self.current_header_col = min(len(columns) - 1, self.current_header_col + 1)
+            self.draw_interface()
+        elif key in (curses.KEY_ENTER, 10, 13):
+            self._sort_by_column(columns)
+        elif key == curses.KEY_DOWN:
+            # Switch to results mode and select first result
+            self.current_focus = "results"
+            self.current_result = 0
+            self.draw_interface()
+
+    def _sort_by_column(self, columns):
+        """Sort results by the currently selected column"""
+        if self.current_header_col >= len(columns):
+            return
+
+        _, col_type = columns[self.current_header_col]
+
+        logging.debug(f"Sorting by column: {col_type}")
+
+        # Determine new sort mode
+        new_sort_mode = None
+        if col_type == "icon":
+            # Sort by extension since we can't sort by file type
+            new_sort_mode = SortMode.EXTENSION
+            logging.debug("Icon column - sorting by file extension instead")
+        elif col_type == "name":
+            new_sort_mode = SortMode.NAME
+        elif col_type == "size":
+            new_sort_mode = SortMode.SIZE
+        elif col_type == "date_modified":
+            new_sort_mode = SortMode.DATE_MODIFIED
+        elif col_type == "path":
+            new_sort_mode = SortMode.PATH
+
+        if new_sort_mode is None:
+            logging.debug(f"Unknown column type for sorting: {col_type}")
+            return
+
+        logging.debug(
+            f"Current sort field: {self.options.sort_field}, New sort mode: {new_sort_mode}"
+        )
+
+        # Toggle sort order if same column, otherwise default to ascending
+        if self.options.sort_field == new_sort_mode:
+            self.options.sort_ascending = not self.options.sort_ascending
+            logging.debug(
+                f"Toggling sort order to: {'ascending' if self.options.sort_ascending else 'descending'}"
+            )
+        else:
+            self.options.sort_field = new_sort_mode
+            self.options.sort_ascending = True
+            logging.debug(f"Changing sort field to: {new_sort_mode.value} ascending")
+
+        logging.debug(
+            f"Final sort: {self.options.sort_field.value} {'ascending' if self.options.sort_ascending else 'descending'}"
+        )
+
+        # Re-run the search with new sort parameters
+        self.perform_search()
 
     def perform_search(self):
         """Execute search in a separate thread"""
