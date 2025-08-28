@@ -1644,6 +1644,71 @@ class ESExecutor:
         logging.debug(f"Final ES command: {' '.join(cmd)}")
         return cmd
 
+    def _winsearch_script_path(self) -> str:
+        """Absolute path to es_winsearch.py placed next to this TUI."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(here, "es_winsearch.py")
+
+    def build_command_winsearch(self, options: SearchOptions) -> List[str]:
+        """
+        Reuse our ES args, but target es_winsearch.py (Python script) and
+        strip DIR-style /o* sorts that es_winsearch ignores anyway.
+        """
+        # Start from the ES command but drop the 'es.exe' program element.
+        es_cmd = self.build_command(options)  # e.g. ["es.exe", ...]
+        args = es_cmd[1:]  # keep only arguments
+
+        # Remove DIR-style sorts: /on, /o-n, /os, /o-s, /oe, /o-e, /od, /o-d
+        dir_sorts = {"/on", "/o-n", "/os", "/o-s", "/oe", "/o-e", "/od", "/o-d"}
+        args = [a for a in args if a not in dir_sorts]
+
+        # Ensure we keep CSV + no header and columns (already added by build_command)
+        # Invoke es_winsearch.py with the running Python
+        return [sys.executable, self._winsearch_script_path(), *args]
+
+    def execute_search_winsearch(
+        self, options: SearchOptions
+    ) -> Tuple[List["SearchResult"], str]:
+        """
+        Run es_winsearch.py (Windows Search content index) and parse rows into SearchResult.
+        """
+        cmd = self.build_command_winsearch(options)
+        logging.debug(
+            f"Executing WinSearch command: {' '.join(shlex.quote(x) for x in cmd)}"
+        )
+
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            return [], "es_winsearch.py not found next to es_tui.py"
+        except subprocess.TimeoutExpired:
+            return [], "Windows Search (es_winsearch.py) timed out"
+        except Exception as e:
+            return [], f"Windows Search execution error: {e}"
+
+        if r.returncode != 0:
+            err = r.stderr.strip() or f"exit code {r.returncode}"
+            return [], f"Windows Search failed: {err}"
+
+        # Reuse the same CSV parser used for es.exe output.
+        results = self._parse_output(r.stdout, options)
+        return results, ""
+
+    def execute_search_concat(
+        self, options: SearchOptions
+    ) -> Tuple[List["SearchResult"], str]:
+        """
+        Execute both: es.exe (filename/path DB) and es_winsearch.py (content index),
+        then concatenate the result lists—no dedup, no cross-engine resorting.
+        """
+        es_results, es_err = self.execute_search(options)
+        ws_results, ws_err = self.execute_search_winsearch(options)
+
+        combined = es_results + ws_results
+        # Keep the first non-empty error message (if any) for status bar visibility
+        err_msg = es_err or ws_err
+        return combined, err_msg
+
     def _parse_query_string(self, query: str) -> Tuple[List[str], List[str]]:
         """Parse query string to separate search terms from DOS-style switches.
 
@@ -3478,7 +3543,8 @@ class ESTUI:
                 logging.debug("Search thread started")
                 start_time = time.time()
 
-                results, error = self.executor.execute_search(self.options)
+                # Concatenate Everything (es.exe) results with Windows Search (es_winsearch.py) results
+                results, error = self.executor.execute_search_concat(self.options)
 
                 elapsed_time = time.time() - start_time
                 logging.debug(f"Search completed in {elapsed_time:.3f} seconds")
