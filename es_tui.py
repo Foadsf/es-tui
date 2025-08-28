@@ -1465,91 +1465,6 @@ class ESTUI:
             self.cursor_pos = len(new_query)
             self.perform_search()
 
-    def test_terminal_unicode_direct(self):
-        """Direct terminal Unicode test – writes a few emoji to the screen, then shows a report."""
-        if not getattr(self, "debug", False):
-            return
-
-        test_chars = ["📄", "📁", "🎵", "⚙️", "F", "D"]
-        lines = ["Direct Terminal Unicode Test:", ""]
-
-        for i, char in enumerate(test_chars):
-            try:
-                safe_addstr(
-                    self.stdscr, 10 + i, 10, f"Test {i}: {char}", self.colors.NORMAL
-                )
-                lines.append(f"Character {i}: {repr(char)} - written to screen")
-            except Exception as e:
-                lines.append(f"Character {i}: {repr(char)} - FAILED: {e}")
-
-        self.stdscr.refresh()
-        time.sleep(2)  # brief pause so you can see them on the canvas
-        self._show_scroll_dialog("Unicode Test", lines)
-
-    def test_icon_rendering(self):
-        """Test icon rendering capabilities - call with F9 key (debug only)."""
-        if not getattr(self, "debug", False):
-            return
-
-        test_cases = [
-            ("Folder", {"filename": "test", "is_folder": True}),
-            ("PDF", {"filename": "test.pdf", "is_folder": False}),
-            ("Image", {"filename": "test.jpg", "is_folder": False}),
-            ("Code", {"filename": "test.py", "is_folder": False}),
-            ("Generic", {"filename": "test.unknown", "is_folder": False}),
-        ]
-        lines = ["Icon Rendering Test Results:", ""]
-
-        for name, mock_result in test_cases:
-            mock_obj = type("MockResult", (), mock_result)()
-            uni = FileTypeIcons.get_icon(mock_obj, use_unicode=True)
-            asc = FileTypeIcons.get_icon(mock_obj, use_unicode=False)
-            lines.append(f"{name}:")
-            lines.append(f"  Unicode: {repr(uni)} (bytes: {uni.encode('utf-8').hex()})")
-            lines.append(f"  ASCII:   {repr(asc)}")
-            lines.append("")
-
-        if hasattr(self, "_show_scroll_dialog"):
-            self._show_scroll_dialog("Icon Test", lines)
-        else:
-            # Fallback: dump to log if dialog isn't available
-            for ln in lines:
-                logging.debug(ln)
-
-    def log_icon_debug(self, message: str, result=None, extra_data=None):
-        """Specialized logging for icon rendering issues"""
-        try:
-            if not getattr(self, "debug", False):
-                return
-            import time, os
-
-            timestamp = time.strftime("%H:%M:%S")
-            parts = [f"[{timestamp}] ICON: {message}"]
-            if result is not None:
-                fn = getattr(result, "filename", "N/A")
-                parts.append(f"file='{fn}'")
-                parts.append(f"ext='{os.path.splitext(fn)[1]}'")
-                parts.append(f"is_folder={getattr(result, 'is_folder', False)}")
-            if extra_data:
-                for k, v in extra_data.items():
-                    parts.append(f"{k}={repr(v)}")
-            msg = " | ".join(parts)
-            # keep your in-app debug log and normal logger in sync
-            if hasattr(self, "debug_log"):
-                self.debug_log.append(msg)
-            try:
-                logging.debug(msg)
-            except Exception:
-                # If a non-UTF8 handler slips through, degrade just this message
-                safe_msg = msg.encode("ascii", "backslashreplace").decode("ascii")
-                try:
-                    logging.debug(safe_msg)
-                except Exception:
-                    pass
-        except Exception:
-            # never let debug logging crash the UI
-            pass
-
     def detect_terminal_capabilities(self):
         """Detect and log terminal capabilities for Unicode support"""
         try:
@@ -1586,9 +1501,8 @@ class ESTUI:
             return {}
 
     def _draw_icon(self, y: int, x: int, result, attr) -> int:
-        """Draws a file-type icon with comprehensive error handling and logging."""
+        """Draws a file-type icon with comprehensive error handling and fallbacks."""
         if not getattr(self.options, "show_icons", True):
-            self.log_icon_debug("Icons disabled")
             return 0
 
         try:
@@ -1599,48 +1513,26 @@ class ESTUI:
             target_icon = unicode_icon if use_unicode else ascii_icon
             icon_col_w = 2 if use_unicode else 1  # reserve 2 cells for emoji
 
-            self.log_icon_debug(
-                f"Icon selection at ({y},{x})",
-                result,
-                {
-                    "unicode_icon": repr(unicode_icon),
-                    "ascii_icon": repr(ascii_icon),
-                    "target_icon": repr(target_icon),
-                    "use_unicode": use_unicode,
-                    "icon_len": len(target_icon),
-                    "icon_bytes": target_icon.encode("utf-8", errors="replace").hex(),
-                },
-            )
-
             try:
                 safe_addstr(self.stdscr, y, x, target_icon, attr)
-                self.log_icon_debug(f"SUCCESS: Drew {repr(target_icon)} at ({y},{x})")
                 return icon_col_w + 1  # +1 space padding
-            except Exception as e1:
-                self.log_icon_debug(f"FAILED target attempt: {e1}")
-
-                # Fallback to ASCII if wanted unicode
+            except Exception:
+                # Fallback to ASCII if unicode fails
                 if use_unicode and unicode_icon != ascii_icon:
                     try:
                         safe_addstr(self.stdscr, y, x, ascii_icon, attr)
-                        self.log_icon_debug(
-                            f"FALLBACK SUCCESS: Drew ASCII {repr(ascii_icon)}"
-                        )
                         return 2  # keep alignment stable
-                    except Exception as e2:
-                        self.log_icon_debug(f"FAILED ASCII fallback: {e2}")
+                    except Exception:
+                        pass
 
                 # Final fallback: one-letter
                 try:
                     fallback = "D" if getattr(result, "is_folder", False) else "F"
                     safe_addstr(self.stdscr, y, x, fallback, attr)
-                    self.log_icon_debug(f"MINIMAL FALLBACK: Drew {repr(fallback)}")
                     return 2
-                except Exception as e3:
-                    self.log_icon_debug(f"TOTAL FAILURE: {e3}")
+                except Exception:
                     return 2
-        except Exception as e:
-            self.log_icon_debug(f"CRITICAL ERROR in icon drawing: {e}")
+        except Exception:
             return 2
 
     def _show_scroll_dialog(self, title: str, lines: List[str]):
@@ -2175,11 +2067,6 @@ class ESTUI:
                 x_pos += consumed
                 col_i += 1
 
-            if getattr(self.options, "show_icons", True):
-                self.log_icon_debug(
-                    f"Drawing results with icons enabled, icon_w={icon_w}"
-                )
-
             # Name
             name_text = getattr(r, "filename", "")
             safe_addstr(
@@ -2326,11 +2213,6 @@ class ESTUI:
             elif key == curses.KEY_F8:  # toggle unicode/ascii
                 self.options.use_unicode_icons = not self.options.use_unicode_icons
                 self.draw_interface()
-                return
-            elif key == curses.KEY_F9:  # Test icon rendering
-                if getattr(self, "debug", False) or getattr(self, "debug_mode", False):
-                    logging.debug("F9 pressed - testing icon rendering")
-                    self.test_icon_rendering()
                 return
             elif key == curses.KEY_F10 or key == 17:  # F10 or Ctrl+Q
                 if self.debug_mode:
