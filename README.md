@@ -1,6 +1,6 @@
 # ES-TUI: Everything Search Terminal Interface
 
-A comprehensive terminal user interface for [Everything Search](https://www.voidtools.com/) that brings powerful file search capabilities to the command line. Built because Windows Explorer's search functionality remains fundamentally broken after decades.
+A comprehensive terminal user interface for [voidtools Everything Search CLI `es.exe`](https://www.voidtools.com/support/everything/command_line_interface/) that brings powerful file search capabilities to the command line. Built because Windows Explorer's search functionality remains fundamentally broken after decades.
 
 ## Why This Exists
 
@@ -19,85 +19,64 @@ ES-TUI bridges this gap by providing a full-featured terminal interface with mod
 
 ## Features
 
-- **Instant Search**: Leverages Everything's NTFS indexing for sub-second results
-- **Rich TUI**: Full-screen interface with intuitive keyboard navigation
-- **File Type Icons**: Visual indicators for different file types (Unicode/ASCII fallback)
-- **Multiple View Modes**: Customizable columns, sorting, and display options
+### Core Search Capabilities
+- **Instant Search**: Leverages Everything's NTFS indexing for sub-second filename/path results
+- **Content Search**: Integrated Windows Search for file content using `es_winsearch.py`
+- **Hybrid Results**: Combines filename/path results (Everything) with content matches (Windows Search)
 - **Advanced Filtering**: Regex, case-sensitive, whole-word, and path matching
+- **Rich Search Syntax**: Full Everything command-line syntax support
+
+### User Interface
+- **Rich TUI**: Full-screen interface with intuitive keyboard navigation
+- **File Type Icons**: Visual indicators with Unicode/ASCII fallback
+- **Multiple View Modes**: Customizable columns, sorting, and display options
 - **Properties Panel**: Detailed file information with Windows-specific metadata
-- **Export Support**: Save results in CSV, EFU, TXT, M3U, M3U8 formats
 - **EXIF Integration**: View image metadata with PyExifTool support
 - **Keyboard Shortcuts**: Vim-like navigation and standard shortcuts
+
+### Export & Integration
+- **Export Support**: Save results in CSV, EFU, TXT, M3U, M3U8 formats
+- **Clipboard Integration**: Copy paths, filenames, or directories
 - **Debug Mode**: Comprehensive logging for troubleshooting
 
 ## Installation
 
 ### Prerequisites
 
-Install using your preferred Windows package manager:
+Install Everything CLI using your preferred Windows package manager:
 
 **Using Chocolatey:**
 ```cmd
-# Install Everything Search CLI
 choco install es -y
-
-# Install Python 3.8+
-choco install python
-
-# Install Git (if needed)
-choco install git
 ```
 
 **Using Winget:**
 ```cmd
-# Install Everything Search
-winget install voidtools.Everything
-
-# Install Python 3.8+
-winget install Python.Python.3.12
-
-# Install Git (if needed)
-winget install Git.Git
+winget install voidtools.Everything.Cli
 ```
 
 **Using Scoop:**
 ```cmd
-# Add extras bucket for Everything
 scoop bucket add extras
+scoop install everything-cli
+```
 
-# Install Everything Search
-scoop install everything
+### Install Python Dependencies
 
-# Install Python 3.8+
-scoop install python
+```cmd
+# Install required dependencies
+pip install pywin32
 
-# Install Git (if needed)
-scoop install git
+# Install optional dependencies for enhanced features
+pip install pyexiftool windows-curses
 ```
 
 ### Install ES-TUI
 
-**Command Prompt (cmd):**
 ```cmd
 # Clone the repository
 git clone https://github.com/Foadsf/es-tui.git
 cd es-tui
-
-# Install optional dependencies for EXIF support
-pip install pyexiftool windows-curses
-
-# Run ES-TUI
-python es_tui.py
-```
-
-**PowerShell:**
-```powershell
-# Clone the repository
-git clone https://github.com/Foadsf/es-tui.git
-Set-Location es-tui
-
-# Install optional dependencies for EXIF support
-pip install pyexiftool windows-curses
 
 # Run ES-TUI
 python es_tui.py
@@ -107,7 +86,6 @@ python es_tui.py
 
 ### Basic Usage
 
-**Command Prompt:**
 ```cmd
 # Start ES-TUI
 python es_tui.py
@@ -119,55 +97,86 @@ python es_tui.py --query "*.pdf"
 python es_tui.py --debug
 
 # Specify custom es.exe location
-python es_tui.py --es-path "C:\ProgramData\chocolatey\bin\es.exe"
+python es_tui.py --es-path "C:\path\to\es.exe"
+
+# Specify custom ExifTool location
+python es_tui.py --exiftool-path "C:\path\to\exiftool.exe"
 ```
 
-**PowerShell:**
-```powershell
-# Start ES-TUI
-python es_tui.py
+### Creating Command Aliases
 
-# Start with initial search query
-python es_tui.py --query "*.pdf"
+For convenient access, create a command alias using a startup batch file:
 
-# Enable debug mode
-python es_tui.py --debug
+**Create `path\to\default.bat`:**
+```cmd
+@echo off
+doskey est=^"path\to\python.exe^" "path\to\es-tui\es_tui.py" --debug $*
+```
 
-# Specify custom es.exe location
-python es_tui.py --es-path "C:\ProgramData\chocolatey\bin\es.exe"
+**Configure Windows Terminal profile:**
+- Command line: `%SystemRoot%\System32\cmd.exe /k "path\to\default.bat"`
+- This loads your aliases automatically when opening a new terminal
+
+**Usage after setup:**
+```cmd
+est *.pdf
+est --query "readme"
 ```
 
 ### Keyboard Shortcuts
 
-| Key              | Action                        |
-| ---------------- | ----------------------------- |
-| `F1` / `?`       | Show help                     |
-| `F2` / `Ctrl+O`  | Open options                  |
-| `F3` / `Ctrl+E`  | Export results                |
-| `F5` / `Ctrl+R`  | New search                    |
-| `F6` / `x`       | Show EXIF metadata            |
-| `F7`             | Toggle icons                  |
-| `F8`             | Toggle Unicode/ASCII icons    |
-| `F10` / `Ctrl+Q` | Quit                          |
-| `Tab`            | Switch focus (search/results) |
-| `Enter`          | Open selected file            |
-| `Space`          | Toggle properties panel       |
-| `↑↓` / `j/k`     | Navigate results              |
-| `PgUp/PgDn`      | Scroll by page                |
-| `Home/End`       | Go to first/last result       |
+| Key              | Action                          |
+| ---------------- | ------------------------------- |
+| `F1` / `?`       | Show help                       |
+| `F2` / `Ctrl+O`  | Open options                    |
+| `F3` / `Ctrl+E`  | Export results                  |
+| `F4`             | Advanced search dialog          |
+| `F5` / `Ctrl+R`  | New search                      |
+| `F6` / `x`       | Show EXIF metadata              |
+| `F7`             | Toggle file icons               |
+| `F8`             | Toggle Unicode/ASCII icons      |
+| `F9`             | Toggle debug mode               |
+| `F10` / `Ctrl+Q` | Quit                            |
+| `Tab`            | Switch focus (search/results)   |
+| `Enter`          | Open selected file              |
+| `Space`          | Toggle properties panel         |
+| `c`              | Copy path/location to clipboard |
+| `↑↓` / `j/k`     | Navigate results                |
+| `PgUp/PgDn`      | Scroll by page                  |
+| `Home/End`       | Go to first/last result         |
 
 ### Search Syntax
 
-ES-TUI supports Everything's full search syntax:
+ES-TUI supports Everything's full command-line syntax:
 
 ```
 *.pdf                    # Find all PDF files
 size:>1mb               # Files larger than 1MB
 dm:today                # Files modified today
 regex:\.log$            # Files ending in .log
-folder: /a              # Folders only
-"exact phrase"          # Exact phrase matching
+/ad                     # Folders only
+"exact phrase"          # Exact phrase matching in filenames
+content:"search text"   # Content search (via Windows Search)
 ```
+
+## Dual Search Engine Architecture
+
+ES-TUI uses a hybrid approach combining two search engines:
+
+### Everything Search (es.exe)
+- **Purpose**: Instant filename and path searches
+- **Data Source**: NTFS Master File Table
+- **Speed**: Sub-second results
+- **Coverage**: All files and folders
+
+### Windows Search (es_winsearch.py)
+- **Purpose**: File content and metadata searches
+- **Data Source**: Windows Search Index
+- **Speed**: Fast for indexed content
+- **Coverage**: File contents, properties, metadata
+
+### Result Combination
+Results from both engines are concatenated without deduplication, providing comprehensive coverage of both filenames/paths and content matches.
 
 ## Configuration
 
@@ -187,27 +196,26 @@ folder: /a              # Folders only
 
 - **OS**: Windows 10/11 (primary support)
 - **Python**: 3.8 or higher
-- **Everything**: 1.4+ recommended
+- **Everything CLI**: 1.4+ (es.exe)
+- **Dependencies**: pywin32 (required), pyexiftool (optional), windows-curses (optional)
 - **Terminal**: Command Prompt, PowerShell, Windows Terminal, or any terminal with curses support
-- **Optional**: PyExifTool for image metadata, ExifTool binary
 
 ## Troubleshooting
 
 ### Common Issues
 
+**ES.exe not found:**
+- Ensure Everything CLI is installed: `choco install es -y`
+- Use `--es-path` to specify custom location
+- Check common installation paths:
+  - `%ProgramFiles%\Everything\es.exe`
+  - `%ProgramData%\chocolatey\bin\es.exe`
+  - `%LOCALAPPDATA%\Programs\Everything\es.exe`
+
 **Icons not displaying:**
 - Try F8 to toggle ASCII mode
 - Check terminal Unicode support (Windows Terminal recommended)
 - Enable debug mode to see detailed icon rendering logs
-
-**ES.exe not found:**
-- Ensure Everything is installed and `es.exe` is in PATH
-- Use `--es-path` to specify custom location
-- Check common installation paths:
-  - `%ProgramFiles%\Everything\es.exe`
-  - `%ProgramFiles(x86)%\Everything\es.exe`
-  - `%LOCALAPPDATA%\Programs\Everything\es.exe`
-  - `%ProgramData%\chocolatey\bin\es.exe`
 
 **Search returns no results:**
 - Verify Everything service is running in Services.msc
@@ -215,48 +223,41 @@ folder: /a              # Folders only
 - Try searching in Everything GUI first
 - Ensure NTFS drives are indexed in Everything settings
 
-**Performance issues:**
-- Reduce max results in options (F2)
-- Check Everything's database size and indexing status
-- Enable debug mode to identify bottlenecks
-- Consider excluding network drives from Everything indexing
+**Windows Search integration fails:**
+- Windows Search service must be running
+- Files must be indexed by Windows Search for content searching
+- Check Windows Search settings in Control Panel
+- Use `--debug` to see detailed Windows Search error messages
 
 ### Debug Mode
 
-**Command Prompt:**
+Enable comprehensive logging:
 ```cmd
 python es_tui.py --debug --log-file debug.log
 ```
 
-**PowerShell:**
-```powershell
-python es_tui.py --debug --log-file debug.log
-```
-
 Debug mode provides detailed logging for:
-- Icon rendering issues
-- Terminal capability detection
-- Search command construction
-- File system operations
-- Everything service communication
+- Search command construction and execution
+- Icon rendering and terminal capabilities
+- File system operations and metadata extraction
+- Both Everything and Windows Search interactions
+- UI event handling and error conditions
 
 ### Windows Terminal Configuration
 
-For best Unicode support and icon display, use Windows Terminal with:
-- A font that supports Unicode symbols (Cascadia Code, JetBrains Mono)
-- UTF-8 encoding enabled
-- Hardware acceleration enabled
+For optimal Unicode support and icon display:
+- Use a font supporting Unicode symbols (Cascadia Code, JetBrains Mono)
+- Enable UTF-8 encoding in terminal settings
+- Use Windows Terminal for best compatibility
 
 ## Contributing
 
-Contributions welcome! Areas needing work:
-
-- Cross-platform compatibility testing (Linux/macOS)
-- Additional export formats
-- Performance optimizations
-- UI/UX improvements
-- Documentation and examples
-- Windows-specific features (junction points, NTFS streams)
+Areas needing development:
+- Cross-platform compatibility testing
+- Performance optimizations for large result sets
+- Additional export formats and integrations
+- UI/UX improvements and customization options
+- Enhanced Windows-specific features (junction points, NTFS streams)
 
 ## License
 
@@ -264,7 +265,6 @@ Released under the MIT License. See `LICENSE` file for details.
 
 ## Acknowledgments
 
-- [voidtools](https://www.voidtools.com/) for creating Everything Search
+- [voidtools](https://www.voidtools.com/) for creating Everything Search and its CLI
 - The Python curses community for terminal UI guidance
-- Windows power users frustrated with Explorer's search failures
-- Package maintainers for Chocolatey, Winget, and Scoop
+- Windows power users frustrated with Explorer's persistent search failures
