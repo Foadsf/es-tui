@@ -439,18 +439,48 @@ class SearchResult:
 class AdvancedSearchOptions:
     """Dataclass to hold the state of the advanced search form."""
 
-    all_words: str = ""
-    exact_phrase: str = ""
-    one_of_words: str = ""
-    none_of_words: str = ""
-    file_extensions: str = ""
-    size_min: str = ""
-    size_max: str = ""
-    date_modified_min: str = ""
-    date_modified_max: str = ""
-    attributes_filter: str = ""
+    # Basic search fields
+    search_text: str = ""
+    search_mode: str = "normal"  # normal, regex, case, whole-word, match-path
+    match_diacritics: bool = False
+
+    # File type filters
     files_only: bool = False
     folders_only: bool = False
+    file_extensions: str = ""  # comma-separated
+
+    # Size filters
+    size_min: str = ""
+    size_max: str = ""
+    size_format: str = "auto"  # auto, bytes, kb, mb
+
+    # Date filters
+    date_created_min: str = ""
+    date_created_max: str = ""
+    date_modified_min: str = ""
+    date_modified_max: str = ""
+    date_accessed_min: str = ""
+    date_accessed_max: str = ""
+
+    # Path filters
+    path_filter: str = ""
+    parent_path_filter: str = ""
+
+    # Attributes (Windows DIR style)
+    attributes_include: str = ""  # e.g., "rhs" for read-only, hidden, system
+    attributes_exclude: str = ""  # e.g., "d" to exclude directories
+
+    # Sort options
+    sort_field: str = "name"
+    sort_order: str = "ascending"
+
+    # Display options
+    max_results: str = "1000"
+    offset: str = "0"
+    highlight_results: bool = False
+
+    # Instance
+    instance_name: str = ""
 
 
 class Colors:
@@ -980,152 +1010,326 @@ class AdvancedSearchDialog:
         self.stdscr = stdscr
         self.colors = Colors()
         self.options = AdvancedSearchOptions()
-        self.fields = [
-            ("All these words:", "all_words"),
-            ("This exact phrase:", "exact_phrase"),
-            ("Any of these words:", "one_of_words"),
-            ("None of these words:", "none_of_words"),
-            ("File extensions (csv):", "file_extensions"),
-            ("Size (KB) min:", "size_min"),
-            ("Size (KB) max:", "size_max"),
-            ("Date Modified min:", "date_modified_min"),
-            ("Date Modified max:", "date_modified_max"),
-            ("Files only (Y/N):", "files_only"),
-            ("Folders only (Y/N):", "folders_only"),
-            ("Attributes filter:", "attributes_filter"),
-        ]
         self.current_field_idx = 0
-        self.field_values = {
-            name: getattr(self.options, name) for _, name in self.fields
-        }
         self.is_active = True
+        self.scroll_offset = 0
+
+        # Define all form fields with their types and options
+        self.fields = [
+            ("Search Text:", "search_text", "text"),
+            (
+                "Search Mode:",
+                "search_mode",
+                "select",
+                ["normal", "regex", "case", "whole-word", "match-path"],
+            ),
+            ("Match Diacritics:", "match_diacritics", "bool"),
+            ("", "", "separator"),
+            ("Files Only:", "files_only", "bool"),
+            ("Folders Only:", "folders_only", "bool"),
+            ("File Extensions:", "file_extensions", "text", "Example: pdf,doc,txt"),
+            ("", "", "separator"),
+            ("Size Min:", "size_min", "text", "Examples: 1mb, 500kb, 1000"),
+            ("Size Max:", "size_max", "text", "Examples: 10mb, 5000kb"),
+            ("", "", "separator"),
+            ("Date Created Min:", "date_created_min", "text", "Example: 2024-01-01"),
+            ("Date Created Max:", "date_created_max", "text", "Example: 2024-12-31"),
+            ("Date Modified Min:", "date_modified_min", "text", "Example: lastweek"),
+            ("Date Modified Max:", "date_modified_max", "text", "Example: today"),
+            ("Date Accessed Min:", "date_accessed_min", "text", "Example: yesterday"),
+            ("Date Accessed Max:", "date_accessed_max", "text", "Example: now"),
+            ("", "", "separator"),
+            ("Path Filter:", "path_filter", "text", "Example: C:\\Users\\"),
+            (
+                "Parent Path Filter:",
+                "parent_path_filter",
+                "text",
+                "Example: C:\\Windows\\",
+            ),
+            ("", "", "separator"),
+            (
+                "Attributes Include:",
+                "attributes_include",
+                "text",
+                "Example: rhs (read-only,hidden,system)",
+            ),
+            (
+                "Attributes Exclude:",
+                "attributes_exclude",
+                "text",
+                "Example: d (exclude directories)",
+            ),
+            ("", "", "separator"),
+            (
+                "Sort Field:",
+                "sort_field",
+                "select",
+                [
+                    "name",
+                    "path",
+                    "size",
+                    "extension",
+                    "date-created",
+                    "date-modified",
+                    "date-accessed",
+                    "attributes",
+                ],
+            ),
+            ("Sort Order:", "sort_order", "select", ["ascending", "descending"]),
+            ("", "", "separator"),
+            ("Max Results:", "max_results", "text"),
+            ("Offset:", "offset", "text"),
+            ("Highlight Results:", "highlight_results", "bool"),
+            ("Instance Name:", "instance_name", "text"),
+        ]
 
     def build_query(self) -> str:
-        """Constructs a single es.exe query string from all fields."""
+        """Constructs a comprehensive es.exe query string from all fields."""
         parts = []
-        if self.options.all_words:
-            parts.append(self.options.all_words)
-        if self.options.exact_phrase:
-            # Use double quotes to handle spaces
-            parts.append(f'"{self.options.exact_phrase}"')
-        if self.options.one_of_words:
-            # Use pipes for OR logic
-            or_query = " | ".join(shlex.split(self.options.one_of_words))
-            parts.append(f"({or_query})")
-        if self.options.none_of_words:
-            # Use minus for exclusion
-            none_query = " ".join(
-                [f"-{word}" for word in shlex.split(self.options.none_of_words)]
-            )
-            parts.append(none_query)
-        if self.options.file_extensions:
-            ext_query = " ".join(
-                [
-                    f"ext:{ext.strip()}"
-                    for ext in self.options.file_extensions.split(",")
-                ]
-            )
-            parts.append(ext_query)
-        if self.options.size_min:
-            parts.append(f"size:>{self.options.size_min}kb")
-        if self.options.size_max:
-            parts.append(f"size:<{self.options.size_max}kb")
-        if self.options.date_modified_min:
-            # Note: TUI would need date parsing logic here. For simplicity, we just pass the string.
-            parts.append(f"dm:>={self.options.date_modified_min}")
-        if self.options.date_modified_max:
-            parts.append(f"dm:<={self.options.date_modified_max}")
+
+        # Basic search text
+        if self.options.search_text.strip():
+            parts.append(self.options.search_text.strip())
+
+        # File type filters using ES syntax
         if self.options.files_only:
             parts.append("/a-d")
         elif self.options.folders_only:
             parts.append("/ad")
-        if self.options.attributes_filter:
-            parts.append(f"attributes:{self.options.attributes_filter}")
 
-        return " ".join(parts)
+        # File extensions
+        if self.options.file_extensions.strip():
+            exts = [
+                ext.strip()
+                for ext in self.options.file_extensions.split(",")
+                if ext.strip()
+            ]
+            if len(exts) == 1:
+                parts.append(f"*.{exts[0]}")
+            elif len(exts) > 1:
+                # Multiple extensions: use OR logic
+                ext_query = " | ".join([f"*.{ext}" for ext in exts])
+                parts.append(f"({ext_query})")
+
+        # Size filters
+        if self.options.size_min.strip():
+            parts.append(f"size:>={self.options.size_min}")
+        if self.options.size_max.strip():
+            parts.append(f"size:<={self.options.size_max}")
+
+        # Date filters
+        date_filters = [
+            ("dc", "date_created_min", "date_created_max"),
+            ("dm", "date_modified_min", "date_modified_max"),
+            ("da", "date_accessed_min", "date_accessed_max"),
+        ]
+
+        for prefix, min_attr, max_attr in date_filters:
+            min_val = getattr(self.options, min_attr).strip()
+            max_val = getattr(self.options, max_attr).strip()
+            if min_val:
+                parts.append(f"{prefix}:>={min_val}")
+            if max_val:
+                parts.append(f"{prefix}:<={max_val}")
+
+        # Path filters
+        if self.options.path_filter.strip():
+            parts.append(f'path:"{self.options.path_filter}"')
+        if self.options.parent_path_filter.strip():
+            parts.append(f'parent:"{self.options.parent_path_filter}"')
+
+        # Attributes
+        if self.options.attributes_include.strip():
+            parts.append(f"/a{self.options.attributes_include}")
+        if self.options.attributes_exclude.strip():
+            parts.append(f"/a-{self.options.attributes_exclude}")
+
+        return " ".join(parts) if parts else ""
+
+    def build_command_args(self) -> List[str]:
+        """Build the complete command line arguments for es.exe."""
+        args = []
+
+        # Search mode
+        if self.options.search_mode == "regex":
+            args.append("-regex")
+        elif self.options.search_mode == "case":
+            args.append("-case")
+        elif self.options.search_mode == "whole-word":
+            args.append("-whole-word")
+        elif self.options.search_mode == "match-path":
+            args.append("-match-path")
+
+        if self.options.match_diacritics:
+            args.append("-diacritics")
+
+        # Sort
+        if self.options.sort_field != "name":
+            args.extend(["-sort", self.options.sort_field])
+        if self.options.sort_order == "descending":
+            args.append("-sort-descending")
+
+        # Limits
+        if self.options.max_results.strip() and self.options.max_results != "1000":
+            try:
+                max_res = int(self.options.max_results)
+                args.extend(["-max-results", str(max_res)])
+            except ValueError:
+                pass
+
+        if self.options.offset.strip() and self.options.offset != "0":
+            try:
+                offset = int(self.options.offset)
+                args.extend(["-offset", str(offset)])
+            except ValueError:
+                pass
+
+        # Highlighting
+        if self.options.highlight_results:
+            args.append("-highlight")
+
+        # Instance
+        if self.options.instance_name.strip():
+            args.extend(["-instance", self.options.instance_name])
+
+        # Path filters (separate from search text)
+        if self.options.path_filter.strip():
+            args.extend(["-path", self.options.path_filter])
+        if self.options.parent_path_filter.strip():
+            args.extend(["-parent-path", self.options.parent_path_filter])
+
+        return args
 
     def show(self) -> Optional[str]:
-        """Draws the advanced search dialog and handles input."""
+        """Display the advanced search dialog and return the query string."""
         H, W = self.stdscr.getmaxyx()
-        dialog_h = len(self.fields) + 7
-        dialog_w = min(80, W - 4)
+        dialog_h = min(H - 4, 30)
+        dialog_w = min(W - 4, 100)
         y0 = (H - dialog_h) // 2
         x0 = (W - dialog_w) // 2
 
         win = curses.newwin(dialog_h, dialog_w, y0, x0)
         win.keypad(True)
 
+        # Filter out separator fields for navigation
+        nav_fields = [
+            (i, field) for i, field in enumerate(self.fields) if field[2] != "separator"
+        ]
+
         while self.is_active:
             win.clear()
             win.box()
-            title = " Advanced Search "
-            tx = (dialog_w - len(title)) // 2
+
+            # Title
+            title = " Advanced Search - ES Command Line Options "
+            tx = max(1, (dialog_w - len(title)) // 2)
             safe_addstr(win, 0, tx, title, self.colors.HEADER)
 
-            for i, (label, name) in enumerate(self.fields):
-                attr = self.colors.NORMAL
-                field_val = getattr(self.options, name)
+            # Calculate visible area
+            content_h = dialog_h - 4
 
-                # Checkbox for boolean fields
-                if isinstance(field_val, bool):
-                    label = f"{label} [{'X' if field_val else ' '}]"
+            # Auto-scroll to keep current field visible
+            current_nav_idx = next(
+                (
+                    i
+                    for i, (orig_idx, _) in enumerate(nav_fields)
+                    if orig_idx >= self.current_field_idx
+                ),
+                0,
+            )
+            if current_nav_idx < self.scroll_offset:
+                self.scroll_offset = current_nav_idx
+            elif current_nav_idx >= self.scroll_offset + content_h:
+                self.scroll_offset = current_nav_idx - content_h + 1
 
-                safe_addstr(win, i + 2, 2, label, attr)
+            self.scroll_offset = max(
+                0, min(self.scroll_offset, len(nav_fields) - content_h)
+            )
 
-                if i == self.current_field_idx:
-                    attr = self.colors.SELECTED
-                    # Draw a reversed background for the selected field
-                    field_w = dialog_w - len(label) - 4
-                    if not isinstance(field_val, bool):
-                        safe_addstr(win, i + 2, 2 + len(label), " " * (field_w), attr)
+            # Draw fields
+            y = 2
+            for i in range(
+                self.scroll_offset, min(len(nav_fields), self.scroll_offset + content_h)
+            ):
+                if y >= dialog_h - 2:
+                    break
 
-                # Draw value
-                if not isinstance(field_val, bool):
-                    safe_addstr(win, i + 2, 2 + len(label), str(field_val), attr)
+                field_idx, field_info = nav_fields[i]
+                label, attr_name, field_type = field_info[:3]
 
-            # Footer
-            footer_text = "Enter:Next/Toggle | Esc:Cancel | F5:Search"
-            safe_addstr(win, dialog_h - 2, 2, footer_text, self.colors.INFO)
+                # Skip separators in display
+                if field_type == "separator":
+                    continue
+
+                is_selected = field_idx == self.current_field_idx
+                attr = self.colors.SELECTED if is_selected else self.colors.NORMAL
+
+                # Draw label
+                safe_addstr(win, y, 2, f"{label:<25}", attr)
+
+                # Draw value based on field type
+                if field_type == "bool":
+                    value = getattr(self.options, attr_name)
+                    display_val = "[X]" if value else "[ ]"
+                elif field_type == "select":
+                    value = getattr(self.options, attr_name)
+                    options = field_info[3] if len(field_info) > 3 else []
+                    display_val = f"<{value}>"
+                else:  # text
+                    value = getattr(self.options, attr_name)
+                    display_val = str(value) if value else ""
+                    if len(field_info) > 3:  # has hint
+                        hint = field_info[3]
+                        if not display_val and not is_selected:
+                            display_val = f"({hint})"
+                            attr = self.colors.INFO
+
+                # Truncate if too long
+                max_val_width = dialog_w - 30
+                if len(display_val) > max_val_width:
+                    display_val = display_val[: max_val_width - 3] + "..."
+
+                safe_addstr(win, y, 27, display_val, attr)
+                y += 1
+
+            # Footer with instructions
+            footer = "↑↓:Navigate Enter:Edit Tab:Next F5:Search Esc:Cancel"
+            safe_addstr(win, dialog_h - 2, 2, footer[: dialog_w - 4], self.colors.INFO)
 
             win.refresh()
             key = win.getch()
 
             if key == 27:  # ESC
+                self.is_active = False
                 return None
             elif key == curses.KEY_F5:
-                return self.build_query()
-            elif key in (curses.KEY_ENTER, 10, 13):
-                current_field_name = self.fields[self.current_field_idx][1]
-                if isinstance(getattr(self.options, current_field_name), bool):
-                    setattr(
-                        self.options,
-                        current_field_name,
-                        not getattr(self.options, current_field_name),
-                    )
-                else:
-                    self.current_field_idx = (self.current_field_idx + 1) % len(
-                        self.fields
-                    )
+                query = self.build_query()
+                self.is_active = False
+                return query
             elif key == curses.KEY_UP:
-                self.current_field_idx = (
-                    self.current_field_idx - 1 + len(self.fields)
-                ) % len(self.fields)
-            elif key == curses.KEY_DOWN:
-                self.current_field_idx = (self.current_field_idx + 1) % len(self.fields)
-            elif key in BACKSPACE_KEYS:
-                current_field_name = self.fields[self.current_field_idx][1]
-                current_val = getattr(self.options, current_field_name)
-                if current_val:
-                    setattr(self.options, current_field_name, current_val[:-1])
-            elif 32 <= key < 127:  # Printable ASCII
-                current_field_name = self.fields[self.current_field_idx][1]
-                if isinstance(getattr(self.options, current_field_name), str):
-                    setattr(
-                        self.options,
-                        current_field_name,
-                        getattr(self.options, current_field_name) + chr(key),
-                    )
+                # Find previous non-separator field
+                for i in range(len(nav_fields) - 1, -1, -1):
+                    field_idx, field_info = nav_fields[i]
+                    if (
+                        field_idx < self.current_field_idx
+                        and field_info[2] != "separator"
+                    ):
+                        self.current_field_idx = field_idx
+                        break
+            elif key == curses.KEY_DOWN or key == ord("\t"):
+                # Find next non-separator field
+                for i in range(len(nav_fields)):
+                    field_idx, field_info = nav_fields[i]
+                    if (
+                        field_idx > self.current_field_idx
+                        and field_info[2] != "separator"
+                    ):
+                        self.current_field_idx = field_idx
+                        break
+            elif key in (curses.KEY_ENTER, 10, 13):
+                self._edit_current_field(nav_fields)
 
+        # Cleanup
         try:
             win.erase()
             win.refresh()
@@ -1134,6 +1338,41 @@ class AdvancedSearchDialog:
         except Exception:
             pass
         return None
+
+    def _edit_current_field(self, nav_fields):
+        """Edit the currently selected field."""
+        # Find current field info
+        current_field = None
+        for field_idx, field_info in nav_fields:
+            if field_idx == self.current_field_idx:
+                current_field = field_info
+                break
+
+        if not current_field:
+            return
+
+        label, attr_name, field_type = current_field[:3]
+
+        if field_type == "bool":
+            current_val = getattr(self.options, attr_name)
+            setattr(self.options, attr_name, not current_val)
+        elif field_type == "select":
+            options = current_field[3]
+            current_val = getattr(self.options, attr_name)
+            try:
+                current_idx = options.index(current_val)
+                next_idx = (current_idx + 1) % len(options)
+                setattr(self.options, attr_name, options[next_idx])
+            except ValueError:
+                setattr(self.options, attr_name, options[0])
+        elif field_type == "text":
+            current_val = getattr(self.options, attr_name)
+            dialog = InputDialog(
+                self.stdscr, f"Edit {label}", f"Enter {label.lower()}:", current_val
+            )
+            result = dialog.show()
+            if result is not None:
+                setattr(self.options, attr_name, result)
 
 
 class ExportDialog:
@@ -1223,53 +1462,84 @@ class ESExecutor:
     def build_command(self, options: SearchOptions) -> List[str]:
         cmd = [self.es_path]
 
-        # Search text
-        if options.query:
-            cmd.append(options.query)
+        # Parse the query string to extract DOS-style switches and search terms
+        query_parts, dos_switches = self._parse_query_string(options.query)
 
-        # Modes
-        if options.mode == SearchMode.REGEX:
-            cmd.extend(["-regex"])
-        elif options.mode == SearchMode.CASE_SENSITIVE:
-            cmd.extend(["-case"])
-        elif options.mode == SearchMode.WHOLE_WORD:
-            cmd.extend(["-whole-word"])
-        elif options.mode == SearchMode.MATCH_PATH:
-            cmd.extend(["-match-path"])
+        logging.debug(f"Parsed query parts: {query_parts}")
+        logging.debug(f"Parsed DOS switches: {dos_switches}")
 
-        if options.match_diacritics:
+        # Add search text (non-switch parts)
+        if query_parts:
+            cmd.extend(query_parts)
+
+        # Add DOS-style switches from query
+        cmd.extend(dos_switches)
+
+        # Modes (but don't override if already specified in query)
+        if not any(sw in dos_switches for sw in ["-regex", "-r"]):
+            if options.mode == SearchMode.REGEX:
+                cmd.extend(["-regex"])
+
+        if not any(sw in dos_switches for sw in ["-case", "-i"]):
+            if options.mode == SearchMode.CASE_SENSITIVE:
+                cmd.extend(["-case"])
+
+        if not any(sw in dos_switches for sw in ["-whole-word", "-w", "-ww"]):
+            if options.mode == SearchMode.WHOLE_WORD:
+                cmd.extend(["-whole-word"])
+
+        if not any(sw in dos_switches for sw in ["-match-path", "-p"]):
+            if options.mode == SearchMode.MATCH_PATH:
+                cmd.extend(["-match-path"])
+
+        if (
+            options.match_diacritics
+            and "-diacritics" not in dos_switches
+            and "-a" not in dos_switches
+        ):
             cmd.extend(["-diacritics"])
 
-        # Sort
-        cmd.extend(["-sort", options.sort_field.value])
-        if not options.sort_ascending:
-            cmd.extend(["-sort-descending"])
+        # Sort (don't override if /o specified in query)
+        if not any(sw.startswith("/o") for sw in dos_switches):
+            cmd.extend(["-sort", options.sort_field.value])
+            if not options.sort_ascending:
+                cmd.extend(["-sort-descending"])
 
         # Limits / offset
-        if options.max_results > 0:
+        if options.max_results > 0 and not any(
+            "-max-results" in str(sw) or "-n" in str(sw) for sw in dos_switches
+        ):
             cmd.extend(["-max-results", str(options.max_results)])
-        if options.offset > 0:
+        if options.offset > 0 and not any(
+            "-offset" in str(sw) or "-o" in str(sw) for sw in dos_switches
+        ):
             cmd.extend(["-offset", str(options.offset)])
 
-        # --- Columns: choose an explicit, parseable order ---
-        # We'll always request: name, (optional size), (optional dm), path
+        # Columns
         columns = ["-name"]
         if options.show_size:
             columns.append("-size")
         if options.show_date_modified:
             columns.append("-date-modified")
-        # You can add created/accessed later if you want to show them.
-        columns.append("-path-column")  # directory only; we’ll join with name
+        columns.append("-path-column")
         cmd.extend(columns)
 
         # Stable machine-readable output
         cmd.extend(["-csv", "-no-header"])
 
-        # Filters
-        if options.files_only:
-            cmd.extend(["/a-d"])
-        elif options.folders_only:
-            cmd.extend(["/ad"])
+        # Filters (but don't duplicate file/folder filters from query)
+        has_file_folder_filter = (
+            any(sw in dos_switches for sw in ["/ad", "/a-d"])
+            or "files_only" in str(dos_switches)
+            or "folders_only" in str(dos_switches)
+        )
+
+        if not has_file_folder_filter:
+            if options.files_only:
+                cmd.extend(["/a-d"])
+            elif options.folders_only:
+                cmd.extend(["/ad"])
+
         if options.path_filter:
             cmd.extend(["-path", options.path_filter])
         if options.parent_path_filter:
@@ -1283,32 +1553,106 @@ class ESExecutor:
         if options.date_format != 0:
             cmd.extend(["-date-format", str(options.date_format)])
 
-        # Do NOT add -highlight when using -csv (it’s for pretty console output).
         if options.timeout > 0:
             cmd.extend(["-timeout", str(options.timeout)])
 
+        logging.debug(f"Final ES command: {' '.join(cmd)}")
         return cmd
+
+    def _parse_query_string(self, query: str) -> Tuple[List[str], List[str]]:
+        """Parse query string to separate search terms from DOS-style switches.
+
+        Returns:
+            Tuple of (search_terms, switches)
+        """
+        if not query:
+            return [], []
+
+        import shlex
+
+        try:
+            # Split respecting quotes
+            tokens = shlex.split(query)
+        except ValueError:
+            # Fall back to simple split if shlex fails
+            tokens = query.split()
+
+        search_terms = []
+        switches = []
+
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+
+            # DOS-style switches
+            if token.startswith("/"):
+                switches.append(token)
+            # Unix-style switches
+            elif token.startswith("-"):
+                switches.append(token)
+                # Check if this switch takes an argument
+                if token in [
+                    "-sort",
+                    "-max-results",
+                    "-n",
+                    "-offset",
+                    "-o",
+                    "-path",
+                    "-parent-path",
+                    "-instance",
+                    "-size-format",
+                    "-date-format",
+                    "-timeout",
+                ] and i + 1 < len(tokens):
+                    i += 1
+                    switches.append(tokens[i])
+            else:
+                # Regular search term
+                search_terms.append(token)
+            i += 1
+
+        return search_terms, switches
 
     def execute_search(self, options: SearchOptions) -> Tuple[List[SearchResult], str]:
         cmd = self.build_command(options)
 
+        # Log the complete command being executed
+        logging.debug(f"Executing ES command: {' '.join(cmd)}")
+        logging.debug(f"Query string: '{options.query}'")
+        logging.debug(f"Working directory: {os.getcwd()}")
+
         try:
+            logging.debug("Starting subprocess...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            logging.debug(f"ES process completed with return code: {result.returncode}")
+            logging.debug(f"ES stdout length: {len(result.stdout)} characters")
+            logging.debug(f"ES stderr: '{result.stderr.strip()}'")
+
+            if result.stdout:
+                # Log first few lines of output for debugging
+                lines = result.stdout.split("\n")[:5]
+                logging.debug(f"ES stdout sample: {lines}")
 
             if result.returncode != 0:
                 error_msg = f"ES returned error code {result.returncode}"
                 if result.stderr:
                     error_msg += f": {result.stderr.strip()}"
+                logging.error(f"ES execution failed: {error_msg}")
                 return [], error_msg
 
             results = self._parse_output(result.stdout, options)
+            logging.debug(f"Parsed {len(results)} results from ES output")
             return results, ""
 
         except subprocess.TimeoutExpired:
+            logging.error("ES search timed out after 30 seconds")
             return [], "Search timed out"
         except FileNotFoundError:
+            logging.error(f"ES executable not found at path: {self.es_path}")
             return [], f"ES executable not found: {self.es_path}"
         except Exception as e:
+            logging.error(f"Unexpected error executing ES: {e}", exc_info=True)
             return [], f"Error executing search: {str(e)}"
 
     def _parse_output(self, output: str, options: SearchOptions) -> List[SearchResult]:
@@ -1455,12 +1799,79 @@ class ESTUI:
         self.current_focus = "search"
         self.draw_interface()
         dialog = AdvancedSearchDialog(self.stdscr)
+
+        # Pre-populate with current search if any
+        if self.search_field:
+            dialog.options.search_text = self.search_field
+            logging.debug(f"Pre-populated advanced search with: '{self.search_field}'")
+
         new_query = dialog.show()
 
         if new_query is not None:
+            logging.debug(f"Advanced search generated query: '{new_query}'")
             self.search_field = new_query
             self.cursor_pos = len(new_query)
+
+            # Also apply the command-line arguments to our search options
+            cmd_args = dialog.build_command_args()
+            logging.debug(f"Advanced search generated command args: {cmd_args}")
+
+            self._apply_advanced_options(cmd_args, dialog.options)
+
             self.perform_search()
+        else:
+            logging.debug("Advanced search cancelled")
+
+    def _apply_advanced_options(
+        self, cmd_args: List[str], adv_options: AdvancedSearchOptions
+    ):
+        """Apply advanced search options to the main search options."""
+        # Update search mode based on arguments
+        if "-regex" in cmd_args:
+            self.options.mode = SearchMode.REGEX
+        elif "-case" in cmd_args:
+            self.options.mode = SearchMode.CASE_SENSITIVE
+        elif "-whole-word" in cmd_args:
+            self.options.mode = SearchMode.WHOLE_WORD
+        elif "-match-path" in cmd_args:
+            self.options.mode = SearchMode.MATCH_PATH
+        else:
+            self.options.mode = SearchMode.NORMAL
+
+        self.options.match_diacritics = "-diacritics" in cmd_args
+        self.options.highlight = "-highlight" in cmd_args
+
+        # Update sort options
+        if "-sort" in cmd_args:
+            sort_idx = cmd_args.index("-sort")
+            if sort_idx + 1 < len(cmd_args):
+                sort_field = cmd_args[sort_idx + 1]
+                try:
+                    self.options.sort_field = SortMode(sort_field)
+                except ValueError:
+                    pass
+
+        self.options.sort_ascending = "-sort-descending" not in cmd_args
+
+        # Update limits
+        if "-max-results" in cmd_args:
+            max_idx = cmd_args.index("-max-results")
+            if max_idx + 1 < len(cmd_args):
+                try:
+                    self.options.max_results = int(cmd_args[max_idx + 1])
+                except ValueError:
+                    pass
+
+        # Update filters
+        if "-path" in cmd_args:
+            path_idx = cmd_args.index("-path")
+            if path_idx + 1 < len(cmd_args):
+                self.options.path_filter = cmd_args[path_idx + 1]
+
+        if "-instance" in cmd_args:
+            inst_idx = cmd_args.index("-instance")
+            if inst_idx + 1 < len(cmd_args):
+                self.options.instance_name = cmd_args[inst_idx + 1]
 
     def detect_terminal_capabilities(self):
         """Detect and log terminal capabilities for Unicode support"""
@@ -2518,24 +2929,43 @@ class ESTUI:
         self.options.query = self.search_field.strip()
         self.search_active = True
         self.status_message = "Searching..."
+
+        logging.debug(f"Starting search with query: '{self.options.query}'")
+        logging.debug(
+            f"Search options: mode={self.options.mode}, files_only={self.options.files_only}, folders_only={self.options.folders_only}"
+        )
+
         self.draw_interface()
 
         # Execute search in thread to avoid blocking UI
         def search_thread():
             try:
+                logging.debug("Search thread started")
+                start_time = time.time()
+
                 results, error = self.executor.execute_search(self.options)
+
+                elapsed_time = time.time() - start_time
+                logging.debug(f"Search completed in {elapsed_time:.3f} seconds")
+
                 self.results = results
                 self.current_result = 0
                 self.result_offset = 0
                 self.search_active = False
-                self._ui_dirty = True  # <-- force a redraw even if no key was pressed
-                self.status_message = (
-                    f"Error: {error}" if error else f"Found {len(results)} results"
-                )
+                self._ui_dirty = True
+
+                if error:
+                    self.status_message = f"Error: {error}"
+                    logging.error(f"Search error: {error}")
+                else:
+                    self.status_message = f"Found {len(results)} results"
+                    logging.debug(f"Search successful: {len(results)} results")
+
             except Exception as e:
                 self.search_active = False
                 self._ui_dirty = True
                 self.status_message = f"Search failed: {str(e)}"
+                logging.error(f"Search thread exception: {e}", exc_info=True)
 
         threading.Thread(target=search_thread, daemon=True).start()
 
