@@ -978,6 +978,7 @@ class HelpDialog:
             "  PgUp/PgDn      - Scroll by page",
             "  Home/End       - Go to first/last result",
             "  Space          - Toggle properties panel",
+            "  c              - Copy path/location to clipboard",
             "",
             "SEARCH MODES:",
             "  Normal         - Standard Everything search",
@@ -1960,6 +1961,117 @@ class ESExecutor:
             return False
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to Windows clipboard using PowerShell."""
+    try:
+        import subprocess
+
+        # Escape single quotes for PowerShell
+        escaped_text = text.replace("'", "''")
+
+        # Use PowerShell to set clipboard
+        ps_command = f"Set-Clipboard -Value '{escaped_text}'"
+
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_command],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        if result.returncode == 0:
+            logging.debug(f"Clipboard copy successful: {text[:100]}...")
+            return True
+        else:
+            logging.error(f"PowerShell clipboard failed: {result.stderr}")
+            return False
+
+    except Exception as e:
+        logging.error(f"Clipboard copy exception: {e}")
+        return False
+
+
+class CopyDialog:
+    def __init__(self, stdscr, result: SearchResult):
+        self.stdscr = stdscr
+        self.result = result
+        self.colors = Colors()
+        self.current_option = 0
+
+        # Define copy options
+        self.options = [
+            ("Copy Full Path", lambda: self.result.full_path),
+            ("Copy Directory", lambda: os.path.dirname(self.result.full_path)),
+            ("Copy Filename", lambda: self.result.filename),
+        ]
+
+    def show(self) -> Optional[str]:
+        """Show copy dialog and return selected text to copy."""
+        try:
+            H, W = self.stdscr.getmaxyx()
+            dialog_h = len(self.options) + 6
+            dialog_w = min(60, max(40, W - 4))
+            y0 = (H - dialog_h) // 2
+            x0 = (W - dialog_w) // 2
+
+            win = curses.newwin(dialog_h, dialog_w, y0, x0)
+            win.keypad(True)
+
+            while True:
+                win.clear()
+                try:
+                    win.box()
+                except Exception:
+                    pass
+
+                # Title
+                title = " Copy to Clipboard "
+                tx = max(1, (dialog_w - len(title)) // 2)
+                safe_addstr(win, 0, tx, title, self.colors.HEADER)
+
+                # Show current file info
+                filename = self.result.filename[: dialog_w - 6]
+                safe_addstr(win, 2, 2, f"File: {filename}", self.colors.INFO)
+
+                # Show options
+                for i, (label, _) in enumerate(self.options):
+                    y = 4 + i
+                    attr = (
+                        self.colors.SELECTED
+                        if i == self.current_option
+                        else self.colors.NORMAL
+                    )
+                    safe_addstr(win, y, 4, label, attr)
+
+                # Footer
+                footer = "↑↓: Select  Enter: Copy  Esc: Cancel"
+                safe_addstr(win, dialog_h - 2, 2, footer, self.colors.INFO)
+
+                win.refresh()
+                key = win.getch()
+
+                if key == 27:  # ESC
+                    return None
+                elif key == curses.KEY_UP:
+                    self.current_option = max(0, self.current_option - 1)
+                elif key == curses.KEY_DOWN:
+                    self.current_option = min(
+                        len(self.options) - 1, self.current_option + 1
+                    )
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    _, get_text = self.options[self.current_option]
+                    return get_text()
+
+        finally:
+            try:
+                win.erase()
+                win.refresh()
+                self.stdscr.touchwin()
+                self.stdscr.refresh()
+            except Exception:
+                pass
+
+
 class ESTUI:
     def __init__(
         self,
@@ -2023,6 +2135,29 @@ class ESTUI:
             self.log_debug(f"TUI initialized with debug mode enabled")
             self.log_debug(f"Terminal size: {self.width}x{self.height}")
             self.log_debug(f"ES path: {es_path}")
+
+    def copy_selected(self):
+        """Show copy dialog for selected result and copy to clipboard."""
+        if not self.results or self.current_result >= len(self.results):
+            self.status_message = "No selection to copy"
+            self._ui_dirty = True
+            return
+
+        selected_result = self.results[self.current_result]
+        dialog = CopyDialog(self.stdscr, selected_result)
+        text_to_copy = dialog.show()
+
+        if text_to_copy:
+            success = copy_to_clipboard(text_to_copy)
+            if success:
+                self.status_message = f"Copied to clipboard: {os.path.basename(text_to_copy) if len(text_to_copy) > 50 else text_to_copy}"
+            else:
+                self.status_message = "Failed to copy to clipboard"
+        else:
+            self.status_message = "Copy cancelled"
+
+        self._ui_dirty = True
+        self.draw_interface()
 
     def show_advanced_search(self):
         """Show the advanced search dialog and apply the generated query."""
@@ -2505,6 +2640,8 @@ class ESTUI:
         # Draw context-sensitive help line
         if self.current_focus == "headers":
             help_text = "←→:Select Column Enter:Sort ↓:Results Tab:Search ESC:Search"
+        elif self.current_focus == "results" and self.results:
+            help_text = "c:Copy F1:Help F2:Options F3:Export F4:Advanced F5:Search F6:EXIF F7:Icons F10:Quit Tab:Switch ESC:Search"
         else:
             help_text = "F1:Help F2:Options F3:Export F4:Advanced F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode F9:Debug F10:Quit Tab:Switch ESC:Search"
 
@@ -2920,6 +3057,9 @@ class ESTUI:
                     logging.debug("ESC pressed - focus to search")
                 self.current_focus = "search"
                 self.draw_interface()
+            elif key == 3:  # Ctrl+C
+                if self.current_focus == "results" and self.results:
+                    self.copy_selected()
 
             # Context-specific shortcuts
             elif self.current_focus == "search":
@@ -3157,6 +3297,10 @@ class ESTUI:
                     self.result_offset = self.current_result - visible_rows + 1
                 _refresh_props_if_open()
                 self.draw_interface()
+            return
+
+        elif key in (ord("c"), ord("C")):  # 'c' or 'C' for copy
+            self.copy_selected()
             return
 
         elif key == curses.KEY_PPAGE:
