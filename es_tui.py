@@ -491,15 +491,56 @@ class Colors:
             curses.start_color()
             curses.use_default_colors()
 
-            # Define color pairs
-            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Header
-            curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Highlight
-            curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Success
-            curses.init_pair(4, curses.COLOR_RED, curses.COLOR_BLACK)  # Error
-            curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Info
-            curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # Folder
+            # Define custom colors using the new palette
+            # Dark slate blue background, light text
+            curses.init_pair(
+                1, curses.COLOR_WHITE, curses.COLOR_BLUE
+            )  # Header - will adjust with custom colors if available
+            curses.init_pair(
+                2, curses.COLOR_BLACK, curses.COLOR_RED
+            )  # Highlight - coral background
+            curses.init_pair(
+                3, curses.COLOR_WHITE, curses.COLOR_BLACK
+            )  # Success - keep as is
+            curses.init_pair(
+                4, curses.COLOR_RED, curses.COLOR_BLACK
+            )  # Error - keep red
+            curses.init_pair(
+                5, curses.COLOR_BLUE, curses.COLOR_BLACK
+            )  # Info - slate blue text
+            curses.init_pair(
+                6, curses.COLOR_RED, curses.COLOR_BLACK
+            )  # Folder - coral text
             curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Normal
-            curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_WHITE)  # Selected
+            curses.init_pair(
+                8, curses.COLOR_BLACK, curses.COLOR_YELLOW
+            )  # Selected - cream background
+
+            # Try to define custom colors if terminal supports it
+            if curses.can_change_color() and curses.COLORS >= 256:
+                try:
+                    # Define custom colors (values are 0-1000 in curses)
+                    curses.init_color(20, 364, 408, 541)  # Slate blue #5D688A
+                    curses.init_color(21, 969, 647, 647)  # Coral pink #F7A5A5
+                    curses.init_color(22, 1000, 859, 714)  # Light cream #FFDBB6
+                    curses.init_color(23, 1000, 949, 937)  # Very light cream #FFF2EF
+
+                    # Redefine color pairs with custom colors
+                    curses.init_pair(
+                        1, curses.COLOR_WHITE, 20
+                    )  # Header - white on slate blue
+                    curses.init_pair(
+                        2, curses.COLOR_BLACK, 21
+                    )  # Highlight - black on coral
+                    curses.init_pair(
+                        5, 20, curses.COLOR_BLACK
+                    )  # Info - slate blue text
+                    curses.init_pair(6, 21, curses.COLOR_BLACK)  # Folder - coral text
+                    curses.init_pair(
+                        8, curses.COLOR_BLACK, 22
+                    )  # Selected - black on cream
+                except:
+                    pass  # Fall back to standard colors if custom colors fail
 
             self.HEADER = curses.color_pair(1) | curses.A_BOLD
             self.HIGHLIGHT = curses.color_pair(2) | curses.A_BOLD
@@ -511,7 +552,6 @@ class Colors:
             self.SELECTED = curses.color_pair(8)
         except Exception:
             # Fall back to no-color attributes
-            # Define attributes with fallbacks
             self.HEADER = getattr(curses, "A_BOLD", 0)
             self.HIGHLIGHT = getattr(curses, "A_BOLD", 0)
             self.SUCCESS = 0
