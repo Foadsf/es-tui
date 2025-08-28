@@ -1,0 +1,2812 @@
+#!/usr/bin/env python3
+"""
+ES TUI - Comprehensive Text User Interface for Everything Search (es.exe)
+A full-featured TUI that provides access to all ES functionality in an intuitive manner.
+"""
+
+import os
+import sys
+import subprocess
+import json
+import shlex
+import threading
+import time
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+import argparse
+
+import logging
+from datetime import datetime
+
+try:
+    import curses
+    from curses import panel
+    from curses import ascii as cascii
+
+    BACKSPACE_KEYS = {curses.KEY_BACKSPACE, 8, 127, cascii.BS, cascii.DEL}
+    ENTER_KEYS = {curses.KEY_ENTER, 10, 13}
+    DELETE_KEYS = {curses.KEY_DC, 330}  # many curses builds map KEY_DC to 330
+except ImportError:
+    print("Error: curses module not available. This TUI requires curses support.")
+    sys.exit(1)
+
+
+# ---------- FileTypeIcons ----------
+class FileTypeIcons:
+    UNICODE = {
+        # Documents
+        ".txt": "📄",
+        ".doc": "📄",
+        ".docx": "📄",
+        ".pdf": "📕",
+        ".rtf": "📄",
+        ".odt": "📄",
+        # Images
+        ".jpg": "🖼️",
+        ".jpeg": "🖼️",
+        ".png": "🖼️",
+        ".gif": "🖼️",
+        ".bmp": "🖼️",
+        ".svg": "🖼️",
+        ".ico": "🖼️",
+        # Video
+        ".mp4": "🎬",
+        ".avi": "🎬",
+        ".mkv": "🎬",
+        ".mov": "🎬",
+        ".wmv": "🎬",
+        ".flv": "🎬",
+        # Audio
+        ".mp3": "🎵",
+        ".wav": "🎵",
+        ".flac": "🎵",
+        ".ogg": "🎵",
+        ".m4a": "🎵",
+        ".wma": "🎵",
+        # Archives
+        ".zip": "📦",
+        ".rar": "📦",
+        ".7z": "📦",
+        ".tar": "📦",
+        ".gz": "📦",
+        ".bz2": "📦",
+        # Code
+        ".py": "🐍",
+        ".js": "💛",
+        ".html": "🌐",
+        ".css": "🎨",
+        ".cpp": "⚡",
+        ".c": "⚡",
+        ".java": "☕",
+        ".php": "🔵",
+        # Executables
+        ".exe": "⚙️",
+        ".msi": "⚙️",
+        ".bat": "⚙️",
+        ".cmd": "⚙️",
+        # Folders/default
+        "folder": "📁",
+        "default": "📄",
+    }
+
+    ASCII = {
+        ".txt": "T",
+        ".doc": "W",
+        ".docx": "W",
+        ".pdf": "P",
+        ".rtf": "R",
+        ".odt": "W",
+        ".jpg": "I",
+        ".jpeg": "I",
+        ".png": "I",
+        ".gif": "I",
+        ".bmp": "I",
+        ".svg": "I",
+        ".ico": "I",
+        ".mp4": "V",
+        ".avi": "V",
+        ".mkv": "V",
+        ".mov": "V",
+        ".wmv": "V",
+        ".flv": "V",
+        ".mp3": "A",
+        ".wav": "A",
+        ".flac": "A",
+        ".ogg": "A",
+        ".m4a": "A",
+        ".wma": "A",
+        ".zip": "Z",
+        ".rar": "R",
+        ".7z": "7",
+        ".tar": "T",
+        ".gz": "G",
+        ".bz2": "B",
+        ".py": "P",
+        ".js": "J",
+        ".html": "H",
+        ".css": "C",
+        ".cpp": "C",
+        ".c": "C",
+        ".java": "J",
+        ".php": "P",
+        ".exe": "X",
+        ".msi": "M",
+        ".bat": "B",
+        ".cmd": "B",
+        "folder": "D",
+        "default": "F",
+    }
+
+    @classmethod
+    def get_icon(cls, result, use_unicode: bool = True) -> str:
+        if getattr(result, "is_folder", False):
+            return cls.UNICODE["folder"] if use_unicode else cls.ASCII["folder"]
+        ext = os.path.splitext(getattr(result, "filename", ""))[1].lower()
+        table = cls.UNICODE if use_unicode else cls.ASCII
+        return table.get(ext, table["default"])
+
+
+# --- PyExifTool integration ---
+try:
+    import exiftool  # from PyExifTool package
+
+    HAVE_PYEXIFTOOL = True
+except Exception:
+    exiftool = None
+    HAVE_PYEXIFTOOL = False
+    logging.warning("PyExifTool not available. Extended metadata will be disabled.")
+
+# ---------- Properties helpers (Windows-first) ----------
+import datetime as _dt
+
+
+def _fmt_ts(ts: float) -> str:
+    try:
+        # local time, human-friendly
+        return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _fmt_bytes(n: int) -> str:
+    try:
+        for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
+            if n < 1024 or unit == "PB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024.0
+    except Exception:
+        return str(n)
+
+
+def _windows_get_attrs(path: str) -> Dict[str, str]:
+    import ctypes
+    from ctypes import wintypes as wt
+
+    attrs = {}
+    # Attributes
+    GetFileAttributesW = ctypes.windll.kernel32.GetFileAttributesW
+    GetFileAttributesW.argtypes = [wt.LPCWSTR]
+    GetFileAttributesW.restype = wt.DWORD
+    fa = GetFileAttributesW(path)
+    flags = []
+    if fa != 0xFFFFFFFF:
+        pairs = [
+            (0x0001, "READONLY"),
+            (0x0002, "HIDDEN"),
+            (0x0004, "SYSTEM"),
+            (0x0010, "DIR"),
+            (0x0020, "ARCHIVE"),
+            (0x0400, "COMPRESSED"),
+            (0x2000, "ENCRYPTED"),
+            (0x04000, "REPARSE"),
+            (0x0800, "NOTINDEXED"),
+            (0x1000, "OFFLINE"),
+            (0x0200, "TEMP"),
+        ]
+        for bit, name in pairs:
+            if fa & bit:
+                flags.append(name)
+    attrs["attributes"] = " ".join(flags) if flags else ""
+
+    # Size on disk (allocated/“compressed” size is what Explorer shows)
+    GetCompressedFileSizeW = ctypes.windll.kernel32.GetCompressedFileSizeW
+    GetCompressedFileSizeW.argtypes = [wt.LPCWSTR, wt.LPDWORD]
+    GetCompressedFileSizeW.restype = wt.DWORD
+    high = wt.DWORD(0)
+    low = GetCompressedFileSizeW(path, ctypes.byref(high))
+    if low == 0xFFFFFFFF:
+        # failure → fall back to logical size
+        sz_on_disk = os.path.getsize(path) if os.path.isfile(path) else 0
+    else:
+        sz_on_disk = (high.value << 32) | low
+    attrs["size_on_disk"] = sz_on_disk
+
+    # Associated type & app
+    attrs.update(_windows_assoc_info(path))
+
+    # Owner (PowerShell – no backslashes inside f-string expressions)
+    try:
+        # PowerShell single-quoted literal: escape single quotes by doubling them
+        ps_path = path.replace("'", "''")
+        ps_cmd = f"(Get-Acl -LiteralPath '{ps_path}').Owner"
+
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        owner = r.stdout.strip() or ""
+    except Exception:
+        owner = ""
+    attrs["owner"] = owner
+
+    # MOTW / “blocked”?
+    blocked = False
+    try:
+        if os.path.isfile(path):
+            with open(path + ":Zone.Identifier", "r", encoding="utf-8") as f:
+                blocked = True
+    except Exception:
+        blocked = False
+    attrs["blocked"] = "Yes" if blocked else "No"
+
+    return attrs
+
+
+def _windows_assoc_info(path: str) -> Dict[str, str]:
+    """Best-effort file type description and associated open command."""
+    import winreg
+
+    info = {"type": "", "opens_with": ""}
+    ext = os.path.splitext(path)[1].lower()
+    progid = ""
+
+    # UserChoice first
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice",
+        ) as k:
+            progid, _ = winreg.QueryValueEx(k, "ProgId")
+    except Exception:
+        pass
+
+    # Fallback: HKCR\.ext default
+    if not progid:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext) as k:
+                progid, _ = winreg.QueryValueEx(k, None)
+        except Exception:
+            pass
+
+    # Type (friendly)
+    if progid:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid) as k:
+                type_desc, _ = winreg.QueryValueEx(k, None)
+                info["type"] = str(type_desc)
+        except Exception:
+            pass
+        # Open command
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CLASSES_ROOT, rf"{progid}\shell\open\command"
+            ) as k:
+                cmd, _ = winreg.QueryValueEx(k, None)
+                exe = ""
+                if cmd.startswith('"'):
+                    exe = cmd.split('"')[1]
+                else:
+                    exe = cmd.split(" ")[0]
+                info["opens_with"] = exe
+        except Exception:
+            pass
+
+    # Last resort friendly type
+    if not info["type"]:
+        info["type"] = f"{ext.upper()} file" if ext else "File"
+    return info
+
+
+def gather_file_properties(path: str) -> Dict[str, str]:
+    """Portable wrapper to collect Explorer-like properties."""
+    d: Dict[str, str] = {}
+    try:
+        st = os.stat(path)
+    except Exception as e:
+        logging.error(f"stat failed for {path}: {e}")
+        return {"Error": str(e)}
+
+    d["Name"] = os.path.basename(path.rstrip("\\/"))
+    d["Location"] = os.path.dirname(path)
+    d["Size"] = _fmt_bytes(st.st_size) if os.path.isfile(path) else ""
+    d["Created"] = _fmt_ts(st.st_ctime)
+    d["Modified"] = _fmt_ts(st.st_mtime)
+    d["Accessed"] = _fmt_ts(st.st_atime)
+
+    if sys.platform.startswith("win"):
+        w = _windows_get_attrs(path)
+        if d.get("Size"):
+            d["Size on disk"] = _fmt_bytes(w.get("size_on_disk", 0))
+        d["Type"] = w.get("type", "")
+        d["Opens with"] = w.get("opens_with", "")
+        if w.get("owner"):
+            d["Owner"] = w["owner"]
+        if w.get("attributes"):
+            d["Attributes"] = w["attributes"]
+        d["Blocked"] = w.get("blocked", "No")
+    else:
+        # simple hints for non-Windows
+        d["Type"] = (
+            "Folder"
+            if os.path.isdir(path)
+            else (os.path.splitext(path)[1].upper() + " file")
+        )
+    return d
+
+
+def open_with_default_app(path: str) -> bool:
+    """Open a file/folder with the OS default application. Non-blocking."""
+    try:
+        if sys.platform.startswith("win"):
+            # Equivalent to: start "" "<path>" → uses Shell file associations
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        logging.debug(f"Opened with default app: {path}")
+        return True
+    except Exception as e:
+        logging.error(f"Open failed for {path}: {e}", exc_info=True)
+        return False
+
+
+class SearchMode(Enum):
+    NORMAL = "normal"
+    REGEX = "regex"
+    WHOLE_WORD = "whole_word"
+    CASE_SENSITIVE = "case_sensitive"
+    MATCH_PATH = "match_path"
+
+
+class SortMode(Enum):
+    NAME = "name"
+    PATH = "path"
+    SIZE = "size"
+    EXTENSION = "extension"
+    DATE_CREATED = "date-created"
+    DATE_MODIFIED = "date-modified"
+    DATE_ACCESSED = "date-accessed"
+    ATTRIBUTES = "attributes"
+
+
+class OutputFormat(Enum):
+    DEFAULT = "default"
+    CSV = "csv"
+    EFU = "efu"
+    TXT = "txt"
+    M3U = "m3u"
+    M3U8 = "m3u8"
+
+
+@dataclass
+class SearchOptions:
+    query: str = ""
+    mode: SearchMode = SearchMode.NORMAL
+    sort_field: SortMode = SortMode.NAME
+    sort_ascending: bool = True
+    max_results: int = 1000
+    offset: int = 0
+    match_diacritics: bool = False
+    show_size: bool = True
+    show_date_modified: bool = True
+    show_date_created: bool = False
+    show_date_accessed: bool = False
+    show_attributes: bool = False
+    show_extension: bool = True
+    files_only: bool = False
+    folders_only: bool = False
+    highlight: bool = True
+    path_filter: str = ""
+    parent_path_filter: str = ""
+    instance_name: str = ""
+    timeout: int = 0
+    attributes_filter: str = ""
+    size_format: int = 1  # 0=Auto, 1=Bytes, 2=KB, 3=MB
+    date_format: int = 0  # 0=System, 1=ISO-8601, 2=FILETIME, 3=ISO-8601 UTC
+    custom_columns: List[str] = field(default_factory=list)
+    show_icons: bool = True
+    use_unicode_icons: bool = True  # set False for ASCII fallback
+
+
+@dataclass
+class SearchResult:
+    filename: str
+    full_path: str
+    size: int = 0
+    date_modified: str = ""
+    date_created: str = ""
+    date_accessed: str = ""
+    attributes: str = ""
+    extension: str = ""
+    is_folder: bool = False
+
+
+class Colors:
+    def __init__(self):
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+
+            # Define color pairs
+            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Header
+            curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Highlight
+            curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Success
+            curses.init_pair(4, curses.COLOR_RED, curses.COLOR_BLACK)  # Error
+            curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Info
+            curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # Folder
+            curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Normal
+            curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_WHITE)  # Selected
+
+            self.HEADER = curses.color_pair(1) | curses.A_BOLD
+            self.HIGHLIGHT = curses.color_pair(2) | curses.A_BOLD
+            self.SUCCESS = curses.color_pair(3)
+            self.ERROR = curses.color_pair(4) | curses.A_BOLD
+            self.INFO = curses.color_pair(5)
+            self.FOLDER = curses.color_pair(6) | curses.A_BOLD
+            self.NORMAL = curses.color_pair(7)
+            self.SELECTED = curses.color_pair(8)
+        except Exception:
+            # Fall back to no-color attributes
+            # Define attributes with fallbacks
+            self.HEADER = getattr(curses, "A_BOLD", 0)
+            self.HIGHLIGHT = getattr(curses, "A_BOLD", 0)
+            self.SUCCESS = 0
+            self.ERROR = getattr(curses, "A_BOLD", 0)
+            self.INFO = 0
+            self.FOLDER = getattr(curses, "A_BOLD", 0)
+            self.NORMAL = 0
+            self.SELECTED = 0
+
+
+class StatusBar:
+    def __init__(self, stdscr, y: int):
+        self.stdscr = stdscr
+        self.y = y
+        self.height, self.width = stdscr.getmaxyx()
+
+    def update(self, message: str, color_attr=None):
+        if color_attr is None:
+            color_attr = curses.A_REVERSE
+
+        self.stdscr.move(self.y, 0)
+        self.stdscr.clrtoeol()
+        self.stdscr.addstr(self.y, 0, message[: self.width - 1], color_attr)
+        self.stdscr.refresh()
+
+
+class InputDialog:
+    def __init__(self, stdscr, title: str, prompt: str, initial_value: str = ""):
+        self.stdscr = stdscr
+        self.title = title
+        self.prompt = prompt
+        self.value = initial_value
+        self.colors = Colors()
+
+    def show(self) -> Optional[str]:
+        try:
+            H, W = self.stdscr.getmaxyx()
+            dialog_h = 7
+            dialog_w = min(60, max(30, W - 4))
+            y0 = (H - dialog_h) // 2
+            x0 = (W - dialog_w) // 2
+
+            win = curses.newwin(dialog_h, dialog_w, y0, x0)
+            win.keypad(True)
+            cursor_pos = len(self.value)
+
+            while True:
+                win.clear()
+                try:
+                    win.box()
+                except Exception:
+                    pass
+
+                # Title
+                title = f" {self.title} "
+                tx = max(1, (dialog_w - len(title)) // 2)
+                safe_addstr(win, 0, tx, title, getattr(self.colors, "HEADER", 0))
+
+                # Prompt & input field
+                safe_addstr(win, 2, 2, self.prompt, getattr(self.colors, "NORMAL", 0))
+                field_x = 2
+                field_w = dialog_w - 4
+                # draw reversed field bg
+                safe_addstr(win, 3, field_x, " " * (field_w - 1), curses.A_REVERSE)
+
+                # clip display
+                if cursor_pos >= field_w - 1:
+                    start = cursor_pos - (field_w - 2)
+                else:
+                    start = 0
+                shown = self.value[start : start + field_w - 1]
+                try:
+                    win.addstr(3, field_x, shown, curses.A_REVERSE)
+                except Exception:
+                    safe_addstr(win, 3, field_x, shown)
+
+                safe_addstr(
+                    win,
+                    dialog_h - 2,
+                    2,
+                    "Enter: Accept  Esc: Cancel",
+                    getattr(self.colors, "INFO", 0),
+                )
+
+                # place cursor (avoid last column)
+                cx = field_x + min(cursor_pos - start, field_w - 2)
+                try:
+                    win.move(3, cx)
+                except Exception:
+                    pass
+
+                win.refresh()
+                key = win.getch()
+
+                if key == 27:  # ESC
+                    return None
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    return self.value
+                elif key in BACKSPACE_KEYS:
+                    if cursor_pos > 0:
+                        self.value = (
+                            self.value[: cursor_pos - 1] + self.value[cursor_pos:]
+                        )
+                        cursor_pos -= 1
+                elif key == curses.KEY_DC:
+                    if cursor_pos < len(self.value):
+                        self.value = (
+                            self.value[:cursor_pos] + self.value[cursor_pos + 1 :]
+                        )
+                elif key == curses.KEY_LEFT:
+                    cursor_pos = max(0, cursor_pos - 1)
+                elif key == curses.KEY_RIGHT:
+                    cursor_pos = min(len(self.value), cursor_pos + 1)
+                elif key == curses.KEY_HOME:
+                    cursor_pos = 0
+                elif key == curses.KEY_END:
+                    cursor_pos = len(self.value)
+                elif 32 <= key <= 126:
+                    self.value = (
+                        self.value[:cursor_pos] + chr(key) + self.value[cursor_pos:]
+                    )
+                    cursor_pos += 1
+        finally:
+            try:
+                win.erase()
+                win.refresh()
+                self.stdscr.touchwin()
+                self.stdscr.refresh()
+            except Exception:
+                pass
+
+
+class OptionsDialog:
+    def __init__(self, stdscr, options: SearchOptions):
+        self.stdscr = stdscr
+        self.options = options
+        self.colors = Colors()
+        self.current_item = 0
+
+        # Define option items
+        self.items = [
+            ("Search Mode", self._get_search_mode_text),
+            ("Sort Field", self._get_sort_field_text),
+            ("Sort Order", self._get_sort_order_text),
+            ("Max Results", lambda: str(self.options.max_results)),
+            ("Show Size Column", lambda: "Yes" if self.options.show_size else "No"),
+            (
+                "Show Date Modified",
+                lambda: "Yes" if self.options.show_date_modified else "No",
+            ),
+            (
+                "Show Date Created",
+                lambda: "Yes" if self.options.show_date_created else "No",
+            ),
+            (
+                "Show Attributes",
+                lambda: "Yes" if self.options.show_attributes else "No",
+            ),
+            ("Files Only", lambda: "Yes" if self.options.files_only else "No"),
+            ("Folders Only", lambda: "Yes" if self.options.folders_only else "No"),
+            (
+                "Match Diacritics",
+                lambda: "Yes" if self.options.match_diacritics else "No",
+            ),
+            ("Highlight Results", lambda: "Yes" if self.options.highlight else "No"),
+            ("Path Filter", lambda: self.options.path_filter or "(none)"),
+            ("Instance Name", lambda: self.options.instance_name or "(default)"),
+            ("Size Format", self._get_size_format_text),
+            ("Date Format", self._get_date_format_text),
+        ]
+
+    def _get_search_mode_text(self):
+        mode_names = {
+            SearchMode.NORMAL: "Normal",
+            SearchMode.REGEX: "Regular Expression",
+            SearchMode.WHOLE_WORD: "Whole Words",
+            SearchMode.CASE_SENSITIVE: "Case Sensitive",
+            SearchMode.MATCH_PATH: "Match Full Path",
+        }
+        return mode_names.get(self.options.mode, "Normal")
+
+    def _get_sort_field_text(self):
+        field_names = {
+            SortMode.NAME: "Name",
+            SortMode.PATH: "Path",
+            SortMode.SIZE: "Size",
+            SortMode.EXTENSION: "Extension",
+            SortMode.DATE_CREATED: "Date Created",
+            SortMode.DATE_MODIFIED: "Date Modified",
+            SortMode.DATE_ACCESSED: "Date Accessed",
+            SortMode.ATTRIBUTES: "Attributes",
+        }
+        return field_names.get(self.options.sort_field, "Name")
+
+    def _get_sort_order_text(self):
+        return "Ascending" if self.options.sort_ascending else "Descending"
+
+    def _get_size_format_text(self):
+        formats = ["Auto", "Bytes", "KB", "MB"]
+        return (
+            formats[self.options.size_format]
+            if 0 <= self.options.size_format < len(formats)
+            else "Auto"
+        )
+
+    def _get_date_format_text(self):
+        formats = ["System", "ISO-8601", "FILETIME", "ISO-8601 UTC"]
+        return (
+            formats[self.options.date_format]
+            if 0 <= self.options.date_format < len(formats)
+            else "System"
+        )
+
+    def show(self) -> bool:
+        try:
+            logging.debug("OptionsDialog.show() called")
+            H, W = self.stdscr.getmaxyx()
+
+            # Build the lines once so we can size the dialog safely
+            def render_lines():
+                return [
+                    " Search Options ",  # title placeholder
+                    "",  # spacer
+                    *[f"{label:<20}: {value()}" for (label, value) in self.items],
+                    "",
+                    "↑↓: Navigate  Enter: Edit  Esc: Close",
+                ]
+
+            lines = render_lines()
+            dialog_h = min(max(10, len(lines) + 2), max(8, H - 2))
+            dialog_w = min(max(48, max(len(s) for s in lines) + 4), max(28, W - 4))
+            y0 = (H - dialog_h) // 2
+            x0 = (W - dialog_w) // 2
+            logging.debug(f"Options dialog dims: {dialog_h}x{dialog_w} at ({y0},{x0})")
+
+            win = curses.newwin(dialog_h, dialog_w, y0, x0)
+            win.keypad(True)
+
+            top_idx = 0
+            visible_rows = dialog_h - 5  # border + title + footer
+
+            while True:
+                win.clear()
+                try:
+                    win.box()
+                except Exception:
+                    pass
+
+                # Title (centered)
+                title = " Options "
+                tx = max(1, (dialog_w - len(title)) // 2)
+                safe_addstr(win, 0, tx, title, getattr(self.colors, "HEADER", 0))
+
+                # Recompute lines each frame (values can change)
+                lines = [f"{label:<20}: {value()}" for (label, value) in self.items]
+
+                # Scroll window around current selection
+                if self.current_item < top_idx:
+                    top_idx = self.current_item
+                if self.current_item >= top_idx + visible_rows:
+                    top_idx = self.current_item - visible_rows + 1
+
+                # Body
+                for i in range(visible_rows):
+                    idx = top_idx + i
+                    if idx >= len(lines):
+                        break
+                    attr = (
+                        getattr(self.colors, "SELECTED", 0)
+                        if idx == self.current_item
+                        else getattr(self.colors, "NORMAL", 0)
+                    )
+                    safe_addstr(win, 2 + i, 2, lines[idx], attr)
+
+                # Footer
+                footer = "↑↓: Navigate  Enter: Edit  Esc: Close"
+                safe_addstr(
+                    win, dialog_h - 2, 2, footer, getattr(self.colors, "INFO", 0)
+                )
+
+                win.refresh()
+                key = win.getch()
+
+                if key == 27:  # ESC
+                    break
+                elif key == curses.KEY_UP:
+                    self.current_item = max(0, self.current_item - 1)
+                elif key == curses.KEY_DOWN:
+                    self.current_item = min(len(self.items) - 1, self.current_item + 1)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    try:
+                        self._edit_current_option()
+                    except Exception:
+                        logging.error("Error editing option", exc_info=True)
+
+            # Cleanup
+            try:
+                win.erase()
+                win.refresh()
+                self.stdscr.touchwin()
+                self.stdscr.refresh()
+            except Exception:
+                pass
+            logging.debug("OptionsDialog.show() finished")
+            return True
+        except Exception:
+            logging.error("OptionsDialog.show() fatal", exc_info=True)
+            try:
+                self.stdscr.touchwin()
+                self.stdscr.refresh()
+            except Exception:
+                pass
+            return False
+
+    def _edit_current_option(self):
+        item_name, _ = self.items[self.current_item]
+
+        if item_name == "Search Mode":
+            self._cycle_search_mode()
+        elif item_name == "Sort Field":
+            self._cycle_sort_field()
+        elif item_name == "Sort Order":
+            self.options.sort_ascending = not self.options.sort_ascending
+        elif item_name == "Max Results":
+            self._edit_max_results()
+        elif item_name in [
+            "Show Size Column",
+            "Show Date Modified",
+            "Show Date Created",
+            "Show Attributes",
+            "Files Only",
+            "Folders Only",
+            "Match Diacritics",
+            "Highlight Results",
+        ]:
+            self._toggle_boolean_option(item_name)
+        elif item_name in ["Path Filter", "Instance Name"]:
+            self._edit_string_option(item_name)
+        elif item_name == "Size Format":
+            self.options.size_format = (self.options.size_format + 1) % 4
+        elif item_name == "Date Format":
+            self.options.date_format = (self.options.date_format + 1) % 4
+
+    def _cycle_search_mode(self):
+        modes = list(SearchMode)
+        current_idx = modes.index(self.options.mode)
+        self.options.mode = modes[(current_idx + 1) % len(modes)]
+
+    def _cycle_sort_field(self):
+        fields = list(SortMode)
+        current_idx = fields.index(self.options.sort_field)
+        self.options.sort_field = fields[(current_idx + 1) % len(fields)]
+
+    def _edit_max_results(self):
+        dialog = InputDialog(
+            self.stdscr,
+            "Max Results",
+            "Enter maximum results:",
+            str(self.options.max_results),
+        )
+        result = dialog.show()
+        if result and result.isdigit():
+            self.options.max_results = int(result)
+
+    def _toggle_boolean_option(self, option_name):
+        mapping = {
+            "Show Size Column": "show_size",
+            "Show Date Modified": "show_date_modified",
+            "Show Date Created": "show_date_created",
+            "Show Attributes": "show_attributes",
+            "Files Only": "files_only",
+            "Folders Only": "folders_only",
+            "Match Diacritics": "match_diacritics",
+            "Highlight Results": "highlight",
+        }
+
+        attr_name = mapping.get(option_name)
+        if attr_name:
+            current_value = getattr(self.options, attr_name)
+            setattr(self.options, attr_name, not current_value)
+
+    def _edit_string_option(self, option_name):
+        mapping = {
+            "Path Filter": ("path_filter", "Enter path filter:"),
+            "Instance Name": ("instance_name", "Enter instance name:"),
+        }
+
+        attr_name, prompt = mapping.get(option_name, ("", ""))
+        if attr_name:
+            current_value = getattr(self.options, attr_name)
+            dialog = InputDialog(self.stdscr, option_name, prompt, current_value)
+            result = dialog.show()
+            if result is not None:
+                setattr(self.options, attr_name, result)
+
+
+class HelpDialog:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        self.colors = Colors()
+
+        self.help_text = [
+            "ES TUI - Everything Search Text User Interface",
+            "",
+            "KEYBOARD SHORTCUTS:",
+            "  F1, ?          - Show this help",
+            "  F2, Ctrl+O     - Open search options",
+            "  F3, Ctrl+E     - Export results",
+            "  F5, Ctrl+R     - Refresh/new search",
+            "  F10, Ctrl+Q    - Quit",
+            "  Enter          - Open selected file/folder",
+            "  Tab            - Focus next panel",
+            "  Esc            - Return to search field",
+            "",
+            "SEARCH FIELD:",
+            "  Type to search, Enter to execute",
+            "  Everything search syntax supported",
+            "",
+            "RESULTS LIST:",
+            "  ↑↓ or j/k      - Navigate results",
+            "  Page Up/Down   - Scroll by page",
+            "  Home/End       - Go to first/last result",
+            "  Space          - Preview file info",
+            "",
+            "SEARCH MODES:",
+            "  Normal         - Standard Everything search",
+            "  Regex          - Regular expression search",
+            "  Whole Word     - Match whole words only",
+            "  Case Sensitive - Case-sensitive search",
+            "  Match Path     - Search in full path",
+            "",
+            "EXPORT FORMATS:",
+            "  CSV, EFU, TXT, M3U, M3U8",
+            "",
+            "Press any key to close help...",
+        ]
+
+    def show(self):
+        try:
+            logging.debug("HelpDialog.show() called")
+            H, W = self.stdscr.getmaxyx()
+            dialog_h = min(len(self.help_text) + 4, H - 2)
+            dialog_w = min(80, W - 4)
+            start_y = (H - dialog_h) // 2
+            start_x = (W - dialog_w) // 2
+
+            logging.debug(
+                f"Dialog dimensions: {dialog_h}x{dialog_w} at ({start_y}, {start_x})"
+            )
+
+            win = curses.newwin(dialog_h, dialog_w, start_y, start_x)
+            win.keypad(True)
+            win.clear()
+            win.box()
+
+            # Title
+            title = " Help "
+            title_x = max(1, (dialog_w - len(title)) // 2)
+            safe_addstr(win, 0, title_x, title, self.colors.HEADER)
+
+            # Body (use safe_addstr)
+            for i, line in enumerate(self.help_text):
+                if i >= dialog_h - 3:
+                    break
+                y = i + 2
+                if line.startswith("  "):
+                    safe_addstr(win, y, 2, line, self.colors.INFO)
+                elif line.endswith(":"):
+                    safe_addstr(win, y, 2, line, self.colors.HIGHLIGHT)
+                else:
+                    safe_addstr(win, y, 2, line, self.colors.NORMAL)
+
+            win.refresh()
+            logging.debug("Help dialog displayed, waiting for key")
+            _ = win.getch()
+
+            # Clean up
+            win.erase()
+            win.refresh()
+            self.stdscr.touchwin()
+            self.stdscr.refresh()
+            logging.debug("Help dialog cleanup complete")
+
+        except Exception as e:
+            logging.error(f"Error in HelpDialog.show(): {e}", exc_info=True)
+            try:
+                self.stdscr.touchwin()
+                self.stdscr.refresh()
+            except:
+                pass
+
+
+class ExportDialog:
+    def __init__(self, stdscr, results: List[SearchResult]):
+        self.stdscr = stdscr
+        self.results = results
+        self.colors = Colors()
+        self.format = OutputFormat.CSV
+        self.filename = ""
+
+    def show(self) -> Optional[Tuple[OutputFormat, str]]:
+        height, width = self.stdscr.getmaxyx()
+        dialog_height = 10
+        dialog_width = min(60, width - 4)
+        start_y = (height - dialog_height) // 2
+        start_x = (width - dialog_width) // 2
+
+        dialog_win = curses.newwin(dialog_height, dialog_width, start_y, start_x)
+        dialog_panel = panel.new_panel(dialog_win)
+
+        formats = list(OutputFormat)
+        current_format = 0
+
+        while True:
+            dialog_win.clear()
+            dialog_win.box()
+
+            # Title
+            title = " Export Results "
+            title_x = (dialog_width - len(title)) // 2
+            dialog_win.addstr(0, title_x, title, self.colors.HEADER)
+
+            # Format selection
+            dialog_win.addstr(2, 2, "Format:")
+            for i, fmt in enumerate(formats):
+                y = 3 + i
+                if i == current_format:
+                    attr = self.colors.SELECTED
+                else:
+                    attr = self.colors.NORMAL
+                dialog_win.addstr(y, 4, fmt.value.upper(), attr)
+
+            # Instructions
+            dialog_win.addstr(8, 2, "↑↓: Select format | Enter: Export | Esc: Cancel")
+
+            panel.update_panels()
+            curses.doupdate()
+
+            key = dialog_win.getch()
+
+            if key == 27:  # ESC
+                result = None
+                break
+            elif key == curses.KEY_UP:
+                current_format = max(0, current_format - 1)
+            elif key == curses.KEY_DOWN:
+                current_format = min(len(formats) - 1, current_format + 1)
+            elif key in (curses.KEY_ENTER, 10, 13):  # Enter
+                selected_format = formats[current_format]
+
+                # Get filename
+                default_name = f"search_results.{selected_format.value}"
+                filename_dialog = InputDialog(
+                    self.stdscr, "Export Filename", "Enter filename:", default_name
+                )
+                filename = filename_dialog.show()
+
+                if filename:
+                    result = (selected_format, filename)
+                    break
+                else:
+                    result = None
+                    break
+
+        del dialog_panel
+        del dialog_win
+        self.stdscr.clear()
+        self.stdscr.refresh()
+
+        return result
+
+
+class ESExecutor:
+    def __init__(self, es_path: str = "es.exe"):
+        self.es_path = es_path
+
+    def build_command(self, options: SearchOptions) -> List[str]:
+        cmd = [self.es_path]
+
+        # Search text
+        if options.query:
+            cmd.append(options.query)
+
+        # Modes
+        if options.mode == SearchMode.REGEX:
+            cmd.extend(["-regex"])
+        elif options.mode == SearchMode.CASE_SENSITIVE:
+            cmd.extend(["-case"])
+        elif options.mode == SearchMode.WHOLE_WORD:
+            cmd.extend(["-whole-word"])
+        elif options.mode == SearchMode.MATCH_PATH:
+            cmd.extend(["-match-path"])
+
+        if options.match_diacritics:
+            cmd.extend(["-diacritics"])
+
+        # Sort
+        cmd.extend(["-sort", options.sort_field.value])
+        if not options.sort_ascending:
+            cmd.extend(["-sort-descending"])
+
+        # Limits / offset
+        if options.max_results > 0:
+            cmd.extend(["-max-results", str(options.max_results)])
+        if options.offset > 0:
+            cmd.extend(["-offset", str(options.offset)])
+
+        # --- Columns: choose an explicit, parseable order ---
+        # We'll always request: name, (optional size), (optional dm), path
+        columns = ["-name"]
+        if options.show_size:
+            columns.append("-size")
+        if options.show_date_modified:
+            columns.append("-date-modified")
+        # You can add created/accessed later if you want to show them.
+        columns.append("-path-column")  # directory only; we’ll join with name
+        cmd.extend(columns)
+
+        # Stable machine-readable output
+        cmd.extend(["-csv", "-no-header"])
+
+        # Filters
+        if options.files_only:
+            cmd.extend(["/a-d"])
+        elif options.folders_only:
+            cmd.extend(["/ad"])
+        if options.path_filter:
+            cmd.extend(["-path", options.path_filter])
+        if options.parent_path_filter:
+            cmd.extend(["-parent-path", options.parent_path_filter])
+        if options.instance_name:
+            cmd.extend(["-instance", options.instance_name])
+
+        # Formats
+        if options.size_format != 1:
+            cmd.extend(["-size-format", str(options.size_format)])
+        if options.date_format != 0:
+            cmd.extend(["-date-format", str(options.date_format)])
+
+        # Do NOT add -highlight when using -csv (it’s for pretty console output).
+        if options.timeout > 0:
+            cmd.extend(["-timeout", str(options.timeout)])
+
+        return cmd
+
+    def execute_search(self, options: SearchOptions) -> Tuple[List[SearchResult], str]:
+        cmd = self.build_command(options)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                error_msg = f"ES returned error code {result.returncode}"
+                if result.stderr:
+                    error_msg += f": {result.stderr.strip()}"
+                return [], error_msg
+
+            results = self._parse_output(result.stdout, options)
+            return results, ""
+
+        except subprocess.TimeoutExpired:
+            return [], "Search timed out"
+        except FileNotFoundError:
+            return [], f"ES executable not found: {self.es_path}"
+        except Exception as e:
+            return [], f"Error executing search: {str(e)}"
+
+    def _parse_output(self, output: str, options: SearchOptions) -> List[SearchResult]:
+        import csv, io, os
+
+        results: List[SearchResult] = []
+
+        # Our build_command orders columns as:
+        #  name, [size], [date-modified], path
+        reader = csv.reader(io.StringIO(output))
+        for row in reader:
+            if not row:
+                continue
+            i = 0
+            name = row[i].strip()
+            i += 1
+
+            size = 0
+            if options.show_size and i < len(row):
+                try:
+                    size = int(row[i].strip())
+                except Exception:
+                    size = 0
+                i += 1
+
+            date_modified = ""
+            if options.show_date_modified and i < len(row):
+                date_modified = row[i].strip()
+                i += 1
+
+            path = row[i].strip() if i < len(row) else ""
+            full_path = os.path.join(path, name) if path else name
+
+            # Determine folder/file (best-effort; Everything may return stale paths)
+            is_folder = os.path.isdir(full_path) if os.path.exists(full_path) else False
+
+            results.append(
+                SearchResult(
+                    filename=name,
+                    full_path=full_path,
+                    size=size,
+                    date_modified=date_modified,
+                    is_folder=is_folder,
+                )
+            )
+        return results
+
+    def export_results(
+        self,
+        results: List[SearchResult],
+        format_type: OutputFormat,
+        filename: str,
+        options: SearchOptions,
+    ) -> bool:
+        try:
+            # Build export command
+            cmd = self.build_command(options)
+
+            # Add export format
+            format_map = {
+                OutputFormat.CSV: "-export-csv",
+                OutputFormat.EFU: "-export-efu",
+                OutputFormat.TXT: "-export-txt",
+                OutputFormat.M3U: "-export-m3u",
+                OutputFormat.M3U8: "-export-m3u8",
+            }
+
+            export_flag = format_map.get(format_type, "-export-csv")
+            cmd.extend([export_flag, filename])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return result.returncode == 0
+
+        except Exception:
+            return False
+
+
+class ESTUI:
+    def __init__(
+        self,
+        stdscr,
+        es_path: str = "es.exe",
+        debug: bool = False,
+        verbose: bool = False,
+        exiftool_path: Optional[str] = None,
+    ):
+        self.stdscr = stdscr
+        self.colors = Colors()
+        self.executor = ESExecutor(es_path)
+        self.options = SearchOptions()
+        self.results: List[SearchResult] = []
+        self.current_result = 0
+        self.result_offset = 0
+        self.status_message = "Ready"
+        self.search_active = False
+        self.current_focus = "search"  # "search" or "results"
+        self.debug = debug
+        self.verbose = verbose
+        self.debug_log = []  # Store debug messages
+        self.spinner_frames = ["|", "/", "-", "\\"]
+        self.spinner_index = 0
+        self._ui_dirty = False  # set True whenever background work finishes
+
+        # ExifTool path for metadata extraction
+        self.exiftool_path = exiftool_path
+        self.exif_cache: Dict[str, Dict[str, Any]] = {}  # path -> metadata dict
+
+        # Properties pane state
+        self.props_visible = False
+        self.props_cache: Dict[str, Dict[str, str]] = {}
+        self.props_data: Optional[Dict[str, str]] = None
+
+        # Setup curses
+        curses.curs_set(1)
+        self.stdscr.keypad(True)
+        self.stdscr.timeout(100)
+
+        # Set dimensions FIRST
+        self.height, self.width = self.stdscr.getmaxyx()
+
+        # Debug logging
+        self.debug_mode = logging.getLogger().isEnabledFor(logging.DEBUG)
+        if self.debug_mode:
+            logging.debug("TUI initialized")
+            logging.debug(f"Terminal size: {self.height}x{self.width}")
+            logging.debug(f"ES path: {es_path}")
+
+        if getattr(self, "debug", False):
+            self.detect_terminal_capabilities()
+
+        # Initialize UI components
+        self.height, self.width = self.stdscr.getmaxyx()
+        self.search_field = ""
+        self.cursor_pos = 0
+
+        # Create status bar
+        self.status_bar = StatusBar(self.stdscr, self.height - 1)
+
+        if self.debug:
+            self.log_debug(f"TUI initialized with debug mode enabled")
+            self.log_debug(f"Terminal size: {self.width}x{self.height}")
+            self.log_debug(f"ES path: {es_path}")
+
+    def test_terminal_unicode_direct(self):
+        """Direct terminal Unicode test – writes a few emoji to the screen, then shows a report."""
+        if not getattr(self, "debug", False):
+            return
+
+        test_chars = ["📄", "📁", "🎵", "⚙️", "F", "D"]
+        lines = ["Direct Terminal Unicode Test:", ""]
+
+        for i, char in enumerate(test_chars):
+            try:
+                safe_addstr(
+                    self.stdscr, 10 + i, 10, f"Test {i}: {char}", self.colors.NORMAL
+                )
+                lines.append(f"Character {i}: {repr(char)} - written to screen")
+            except Exception as e:
+                lines.append(f"Character {i}: {repr(char)} - FAILED: {e}")
+
+        self.stdscr.refresh()
+        time.sleep(2)  # brief pause so you can see them on the canvas
+        self._show_scroll_dialog("Unicode Test", lines)
+
+    def test_icon_rendering(self):
+        """Test icon rendering capabilities - call with F9 key (debug only)."""
+        if not getattr(self, "debug", False):
+            return
+
+        test_cases = [
+            ("Folder", {"filename": "test", "is_folder": True}),
+            ("PDF", {"filename": "test.pdf", "is_folder": False}),
+            ("Image", {"filename": "test.jpg", "is_folder": False}),
+            ("Code", {"filename": "test.py", "is_folder": False}),
+            ("Generic", {"filename": "test.unknown", "is_folder": False}),
+        ]
+        lines = ["Icon Rendering Test Results:", ""]
+
+        for name, mock_result in test_cases:
+            mock_obj = type("MockResult", (), mock_result)()
+            uni = FileTypeIcons.get_icon(mock_obj, use_unicode=True)
+            asc = FileTypeIcons.get_icon(mock_obj, use_unicode=False)
+            lines.append(f"{name}:")
+            lines.append(f"  Unicode: {repr(uni)} (bytes: {uni.encode('utf-8').hex()})")
+            lines.append(f"  ASCII:   {repr(asc)}")
+            lines.append("")
+
+        if hasattr(self, "_show_scroll_dialog"):
+            self._show_scroll_dialog("Icon Test", lines)
+        else:
+            # Fallback: dump to log if dialog isn't available
+            for ln in lines:
+                logging.debug(ln)
+
+    def log_icon_debug(self, message: str, result=None, extra_data=None):
+        """Specialized logging for icon rendering issues"""
+        try:
+            if not getattr(self, "debug", False):
+                return
+            import time, os
+
+            timestamp = time.strftime("%H:%M:%S")
+            parts = [f"[{timestamp}] ICON: {message}"]
+            if result is not None:
+                fn = getattr(result, "filename", "N/A")
+                parts.append(f"file='{fn}'")
+                parts.append(f"ext='{os.path.splitext(fn)[1]}'")
+                parts.append(f"is_folder={getattr(result, 'is_folder', False)}")
+            if extra_data:
+                for k, v in extra_data.items():
+                    parts.append(f"{k}={repr(v)}")
+            msg = " | ".join(parts)
+            # keep your in-app debug log and normal logger in sync
+            if hasattr(self, "debug_log"):
+                self.debug_log.append(msg)
+            try:
+                logging.debug(msg)
+            except Exception:
+                # If a non-UTF8 handler slips through, degrade just this message
+                safe_msg = msg.encode("ascii", "backslashreplace").decode("ascii")
+                try:
+                    logging.debug(safe_msg)
+                except Exception:
+                    pass
+        except Exception:
+            # never let debug logging crash the UI
+            pass
+
+    def detect_terminal_capabilities(self):
+        """Detect and log terminal capabilities for Unicode support"""
+        try:
+            info = {
+                "TERM": os.environ.get("TERM", "unknown"),
+                "LANG": os.environ.get("LANG", "unknown"),
+                "LC_ALL": os.environ.get("LC_ALL", "unknown"),
+                "platform": sys.platform,
+                "terminal_size": f"{self.height}x{self.width}",
+            }
+            try:
+                test_emoji = "📄"
+                (sys.stdout.encoding or "utf-8")  # just to read it
+                test_emoji.encode(sys.stdout.encoding or "utf-8")
+                info["unicode_encode"] = "OK"
+            except Exception as e:
+                info["unicode_encode"] = f"FAILED: {e}"
+
+            try:
+                info["colors"] = curses.can_change_color()
+                info["color_pairs"] = getattr(curses, "COLOR_PAIRS", "unknown")
+            except Exception:
+                info["colors"] = "unknown"
+
+            # use your existing debug logger
+            if hasattr(self, "log_debug"):
+                self.log_debug(f"Terminal capabilities: {info}")
+            else:
+                logging.debug(f"Terminal capabilities: {info}")
+
+            return info
+        except Exception as e:
+            logging.debug(f"detect_terminal_capabilities failed: {e}")
+            return {}
+
+    def _draw_icon(self, y: int, x: int, result, attr) -> int:
+        """Draws a file-type icon with comprehensive error handling and logging."""
+        if not getattr(self.options, "show_icons", True):
+            self.log_icon_debug("Icons disabled")
+            return 0
+
+        try:
+            unicode_icon = FileTypeIcons.get_icon(result, use_unicode=True)
+            ascii_icon = FileTypeIcons.get_icon(result, use_unicode=False)
+
+            use_unicode = getattr(self.options, "use_unicode_icons", True)
+            target_icon = unicode_icon if use_unicode else ascii_icon
+            icon_col_w = 2 if use_unicode else 1  # reserve 2 cells for emoji
+
+            self.log_icon_debug(
+                f"Icon selection at ({y},{x})",
+                result,
+                {
+                    "unicode_icon": repr(unicode_icon),
+                    "ascii_icon": repr(ascii_icon),
+                    "target_icon": repr(target_icon),
+                    "use_unicode": use_unicode,
+                    "icon_len": len(target_icon),
+                    "icon_bytes": target_icon.encode("utf-8", errors="replace").hex(),
+                },
+            )
+
+            try:
+                safe_addstr(self.stdscr, y, x, target_icon, attr)
+                self.log_icon_debug(f"SUCCESS: Drew {repr(target_icon)} at ({y},{x})")
+                return icon_col_w + 1  # +1 space padding
+            except Exception as e1:
+                self.log_icon_debug(f"FAILED target attempt: {e1}")
+
+                # Fallback to ASCII if wanted unicode
+                if use_unicode and unicode_icon != ascii_icon:
+                    try:
+                        safe_addstr(self.stdscr, y, x, ascii_icon, attr)
+                        self.log_icon_debug(
+                            f"FALLBACK SUCCESS: Drew ASCII {repr(ascii_icon)}"
+                        )
+                        return 2  # keep alignment stable
+                    except Exception as e2:
+                        self.log_icon_debug(f"FAILED ASCII fallback: {e2}")
+
+                # Final fallback: one-letter
+                try:
+                    fallback = "D" if getattr(result, "is_folder", False) else "F"
+                    safe_addstr(self.stdscr, y, x, fallback, attr)
+                    self.log_icon_debug(f"MINIMAL FALLBACK: Drew {repr(fallback)}")
+                    return 2
+                except Exception as e3:
+                    self.log_icon_debug(f"TOTAL FAILURE: {e3}")
+                    return 2
+        except Exception as e:
+            self.log_icon_debug(f"CRITICAL ERROR in icon drawing: {e}")
+            return 2
+
+    def _show_scroll_dialog(self, title: str, lines: List[str]):
+        """Centered, scrollable text dialog. Up/Down/PgUp/PgDn/Home/End/ESC."""
+        H, W = self.stdscr.getmaxyx()
+        dlg_h = min(max(10, H - 6), H - 2)
+        dlg_w = min(max(40, int(W * 0.8)), W - 2)
+        y0 = (H - dlg_h) // 2
+        x0 = (W - dlg_w) // 2
+
+        win = curses.newwin(dlg_h, dlg_w, y0, x0)
+        win.keypad(True)
+
+        top = 0
+        while True:
+            win.clear()
+            try:
+                win.box()
+            except Exception:
+                pass
+
+            # Title
+            tx = max(1, (dlg_w - len(title) - 2) // 2)
+            try:
+                win.addstr(0, tx, f" {title} ", self.colors.HEADER)
+            except Exception:
+                pass
+
+            # Draw a window of lines
+            body_h = dlg_h - 4
+            view = lines[top : top + body_h]
+            for i, line in enumerate(view):
+                # wrap long lines
+                remaining = line
+                col = 2
+                row = 2 + i
+                maxw = dlg_w - 4
+                if len(remaining) > maxw:
+                    remaining = remaining[:maxw]
+                try:
+                    win.addstr(row, col, remaining)
+                except Exception:
+                    pass
+
+            # Footer
+            footer = "↑↓ PgUp/PgDn Home/End  Esc:Close"
+            try:
+                win.addstr(dlg_h - 1, 2, footer[: dlg_w - 4], self.colors.INFO)
+            except Exception:
+                pass
+
+            win.refresh()
+            k = win.getch()
+            if k in (27,):  # ESC
+                break
+            elif k == curses.KEY_UP:
+                top = max(0, top - 1)
+            elif k == curses.KEY_DOWN:
+                top = min(max(0, len(lines) - body_h), top + 1)
+            elif k == curses.KEY_PPAGE:
+                top = max(0, top - body_h)
+            elif k == curses.KEY_NPAGE:
+                top = min(max(0, len(lines) - body_h), top + body_h)
+            elif k == curses.KEY_HOME:
+                top = 0
+            elif k == curses.KEY_END:
+                top = max(0, len(lines) - body_h)
+
+        try:
+            win.erase()
+            win.refresh()
+            self.stdscr.touchwin()
+            self.stdscr.refresh()
+        except Exception:
+            pass
+
+    def show_exif_metadata(self):
+        """Use PyExifTool to read metadata for the selected file and show it."""
+        if not self.results or self.current_result >= len(self.results):
+            self.status_message = "No selection"
+            self._ui_dirty = True
+            return
+
+        path = self.results[self.current_result].full_path
+
+        # Cache to avoid re-spawning exiftool on the same file
+        if path in self.exif_cache:
+            data = self.exif_cache[path]
+        else:
+            if not HAVE_PYEXIFTOOL:
+                self.status_message = (
+                    "PyExifTool not installed (pip install pyexiftool)"
+                )
+                self._ui_dirty = True
+                return
+            try:
+                # If exiftool.exe is not on PATH, allow overriding via --exiftool-path.
+                # PyExifTool lets you specify the executable path this way. :contentReference[oaicite:3]{index=3}
+                kw = {}
+                if self.exiftool_path:
+                    kw["executable"] = self.exiftool_path
+
+                # ExifToolHelper is the high-level interface; get_metadata returns list[dict]. :contentReference[oaicite:4]{index=4}
+                with exiftool.ExifToolHelper(**kw) as et:
+                    out = et.get_metadata(path)
+                data = out[0] if out else {"Error": "No metadata returned"}
+                self.exif_cache[path] = data
+            except Exception as e:
+                logging.error(f"ExifTool error: {e}", exc_info=True)
+                self.status_message = "ExifTool failed (see log)"
+                self._ui_dirty = True
+                return
+
+        # Build display lines from the dict. Keep SourceFile first, then sorted keys.
+        lines: List[str] = []
+        if "SourceFile" in data:
+            lines.append(f"SourceFile = {data['SourceFile']}")
+        for k in sorted(data.keys()):
+            if k == "SourceFile":
+                continue
+            v = data[k]
+            # normalize values
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v)
+            elif isinstance(v, dict):
+                v = json.dumps(v, ensure_ascii=False)
+            else:
+                v = str(v)
+            lines.append(f"{k} = {v}")
+
+        title = "ExifTool Metadata"
+        self._show_scroll_dialog(title, lines)
+        self._ui_dirty = True
+        self.draw_interface()
+
+    def toggle_properties(self):
+        """Toggle the properties pane for the current selection."""
+        if not self.results:
+            self.status_message = "No selection"
+            self._ui_dirty = True
+            return
+
+        self.props_visible = not getattr(self, "props_visible", False)
+        if self.props_visible:
+            sel = self.results[max(0, min(self.current_result, len(self.results) - 1))]
+            path = getattr(sel, "full_path", sel.filename)
+            # cache
+            if path not in self.props_cache:
+                try:
+                    self.props_cache[path] = gather_file_properties(path)
+                except Exception as e:
+                    logging.error(f"gather_file_properties failed: {e}", exc_info=True)
+                    self.props_cache[path] = {"Error": str(e)}
+            self.props_data = self.props_cache[path]
+        else:
+            self.props_data = None
+        self._ui_dirty = True
+        self.draw_interface()
+
+    def _draw_kv_lines(self, x, y, w, items):
+        """Key: Value table writer using safe_addstr with wrapping."""
+        line = y
+        for k, v in items:
+            key = f"{k}:"
+            safe_addstr(self.stdscr, line, x, key, getattr(self.colors, "HIGHLIGHT", 0))
+            # wrap value
+            val = str(v or "")
+            avail = max(1, w - len(key) - 1)
+            start = 0
+            first = True
+            while start < len(val) or first:
+                chunk = val[start : start + avail]
+                safe_addstr(
+                    self.stdscr,
+                    line,
+                    x + len(key) + 1,
+                    chunk,
+                    getattr(self.colors, "NORMAL", 0),
+                )
+                start += len(chunk)
+                if start < len(val):
+                    line += 1
+                else:
+                    break
+                first = False
+            line += 1
+        return line
+
+    def draw_properties_pane(self):
+        """Draw a right-side properties pane if visible."""
+        if not self.props_visible or not self.props_data:
+            return
+        H, W = self.height, self.width
+        pane_w = min(56, max(30, W // 3))
+        x0 = W - pane_w
+        y0 = 1  # below the title bar
+        h = H - 2
+
+        # separator
+        for r in range(y0, y0 + h):
+            safe_addstr(self.stdscr, r, x0 - 1, "│", getattr(self.colors, "INFO", 0))
+
+        # title
+        title = " Properties "
+        tx = x0 + max(1, (pane_w - len(title)) // 2)
+        safe_addstr(self.stdscr, y0, tx, title, getattr(self.colors, "HEADER", 0))
+
+        # body
+        body_y = y0 + 2
+        items = []
+        # Choose an informative ordering
+        keys = [
+            "Name",
+            "Type",
+            "Opens with",
+            "Location",
+            "Size",
+            "Size on disk",
+            "Created",
+            "Modified",
+            "Accessed",
+            "Owner",
+            "Attributes",
+            "Blocked",
+        ]
+        for k in keys:
+            if k in self.props_data and self.props_data[k]:
+                items.append((k, self.props_data[k]))
+        self._draw_kv_lines(x0 + 1, body_y, pane_w - 2, items)
+
+        # footer
+        footer = "Space: Close  Enter: Open  Esc: Back"
+        safe_addstr(
+            self.stdscr,
+            y0 + h - 1,
+            x0 + 1,
+            footer[: pane_w - 2],
+            getattr(self.colors, "INFO", 0),
+        )
+
+    def log_debug(self, message: str):
+        """Log debug message with timestamp"""
+        if self.debug:
+            timestamp = time.strftime("%H:%M:%S")
+            debug_msg = f"[{timestamp}] {message}"
+            self.debug_log.append(debug_msg)
+
+            # Keep only last 100 debug messages to prevent memory issues
+            if len(self.debug_log) > 100:
+                self.debug_log.pop(0)
+
+    def run(self):
+        """Main TUI loop with idle redraws for background work."""
+        self.draw_interface()
+        while True:
+            self.handle_input()  # getch() returns every 100 ms (timeout set)
+            if self.should_exit:
+                break
+            # While searching: animate & redraw on every idle tick.
+            # When results land: redraw once (_ui_dirty is set by the worker).
+            if self.search_active or getattr(self, "_ui_dirty", False):
+                if self.search_active:
+                    self.spinner_index = (self.spinner_index + 1) % len(
+                        self.spinner_frames
+                    )
+                self.draw_interface()
+                self._ui_dirty = False
+
+    def draw_interface(self):
+        """Draw the complete TUI interface"""
+        self.stdscr.clear()
+
+        # Draw title bar
+        title = "ES TUI - Everything Search"
+        self.stdscr.addstr(0, 0, " " * self.width, self.colors.HEADER)
+        self.stdscr.addstr(0, 2, title, self.colors.HEADER)
+
+        # Show current options in title bar
+        options_text = (
+            f"Mode: {self.options.mode.value} | Sort: {self.options.sort_field.value}"
+        )
+        if len(options_text) < self.width - len(title) - 10:
+            self.stdscr.addstr(
+                0, self.width - len(options_text) - 2, options_text, self.colors.HEADER
+            )
+
+        # Draw search field
+        self.draw_search_field()
+
+        # Draw results
+        self.draw_results()
+
+        # Draw help line
+        help_text = "F1:Help F2:Options F3:Export"
+        if self.debug:
+            help_text += " F4:Debug"
+        help_text += " F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode"
+        if getattr(self, "debug", False) or getattr(self, "debug_mode", False):
+            help_text += "  F9:IconTest"
+        help_text += " F10:Quit Tab:Switch ESC:Search"
+        self.stdscr.addstr(
+            self.height - 2, 0, help_text[: self.width - 1], self.colors.INFO
+        )
+
+        # Update status bar
+        result_count = len(self.results)
+        if result_count > 0:
+            status = f"Found {result_count} results | Selected: {self.current_result + 1}/{result_count}"
+        else:
+            status = self.status_message
+
+        self.status_bar.update(status)
+
+        self.draw_properties_pane()
+
+        # Bottom-right progress bar while searching
+        if self.search_active:
+            bar_w = 12
+            filled = self.spinner_index % (bar_w - 2)
+            bar = "[" + ("=" * filled).ljust(bar_w - 2) + "]"
+            y = self.height - 1
+            x = max(0, self.width - len(bar) - 2)
+            try:
+                self.stdscr.addstr(y, x, bar, self.colors.INFO)
+            except Exception:
+                pass
+
+        self.stdscr.refresh()
+
+    def draw_search_field(self):
+        """Draw the search input field"""
+        y = 2
+        label = "Search: "
+
+        # Draw label
+        self.stdscr.addstr(y, 2, label, self.colors.NORMAL)
+
+        # Draw search field background
+        field_start = 2 + len(label)
+        field_width = self.width - field_start - 2
+
+        if self.current_focus == "search":
+            attr = curses.A_REVERSE
+        else:
+            attr = curses.A_UNDERLINE
+
+        self.stdscr.addstr(y, field_start, " " * field_width, attr)
+
+        # Draw search text
+        display_text = self.search_field
+        if len(display_text) > field_width:
+            # Scroll text if too long
+            start_pos = max(0, self.cursor_pos - field_width + 1)
+            display_text = display_text[start_pos : start_pos + field_width]
+            cursor_display_pos = self.cursor_pos - start_pos
+        else:
+            cursor_display_pos = self.cursor_pos
+
+        self.stdscr.addstr(y, field_start, display_text, attr)
+
+        # Position cursor if search field is active
+        if self.current_focus == "search":
+            curses.curs_set(1)
+            self.stdscr.move(y, field_start + cursor_display_pos)
+        else:
+            curses.curs_set(0)
+
+    def draw_results(self):
+        """Draw the results list with an optional icon column.
+        Respects the right-side Properties pane if visible.
+        """
+        results_start_y = 4
+        results_height = self.height - results_start_y - 3
+        left_pad = 2
+
+        # If a Properties pane is visible, reserve space on the right
+        reserved_right = 0
+        if getattr(self, "props_visible", False) and getattr(self, "props_data", None):
+            # Keep in sync with draw_properties_pane()
+            pane_w = min(56, max(30, self.width // 3))
+            reserved_right = pane_w + 1  # +1 for the vertical separator
+
+        effective_width = max(20, self.width - reserved_right)
+
+        # No results: write a centered message (within effective area)
+        if not self.results:
+            if self.search_active:
+                msg = "Searching..."
+            elif self.search_field:
+                msg = "No results found"
+            else:
+                msg = "Enter search term and press Enter"
+
+            y = results_start_y + results_height // 2
+            x = max(left_pad, (effective_width - len(msg)) // 2)
+            safe_addstr(self.stdscr, y, x, msg, self.colors.INFO)
+            return
+
+        # Calculate visible range (scrolling)
+        if self.current_result < self.result_offset:
+            self.result_offset = self.current_result
+        elif self.current_result >= self.result_offset + results_height:
+            self.result_offset = self.current_result - results_height + 1
+
+        # ----- Column widths -----
+        # Icon column (optional)
+        icon_w = 0
+        if getattr(self.options, "show_icons", True):
+            # reserve 2 cells for emoji (often double-width), plus 1 space padding
+            icon_w = 3 if getattr(self.options, "use_unicode_icons", True) else 2
+
+        # Name column
+        name_w = min(40, effective_width // 3)
+        # Remaining width (header area includes left padding)
+        # layout: [pad] [icon] [name] [size?] [date?] [path]
+        remaining = (
+            effective_width - left_pad - icon_w - name_w - 1
+        )  # -1 space after name
+        headers, widths = [], []
+
+        # Icon header is blank
+        if icon_w:
+            headers.append("")
+            widths.append(icon_w)
+
+        headers.append("Name")
+        widths.append(name_w)
+
+        # Fixed width for Size (right-aligned) if enabled
+        size_w = 0
+        if getattr(self.options, "show_size", False) and remaining > 11:
+            size_w = 10
+            headers.append("Size")
+            widths.append(size_w)
+            remaining -= size_w + 1  # +1 for spacing
+
+        # Fixed width for Modified (left-aligned) if enabled
+        date_w = 0
+        if getattr(self.options, "show_date_modified", False) and remaining > 18:
+            date_w = 19
+            headers.append("Modified")
+            widths.append(date_w)
+            remaining -= date_w + 1
+
+        # Path column takes the rest
+        path_w = max(10, remaining)
+        headers.append("Path")
+        widths.append(path_w)
+
+        # ----- Draw headers -----
+        header_y = results_start_y - 1
+        x_pos = left_pad
+        for header, width in zip(headers, widths):
+            safe_addstr(
+                self.stdscr,
+                header_y,
+                x_pos,
+                header.ljust(width)[:width],
+                self.colors.HEADER,
+            )
+            x_pos += width + 1
+
+        # ----- Draw rows -----
+        for i in range(results_height):
+            idx = self.result_offset + i
+            if idx >= len(self.results):
+                break
+
+            r = self.results[idx]
+            y = results_start_y + i
+
+            # Row attribute
+            if idx == self.current_result:
+                attr = (
+                    self.colors.SELECTED
+                    if self.current_focus == "results"
+                    else self.colors.HIGHLIGHT
+                )
+            elif getattr(r, "is_folder", False):
+                attr = self.colors.FOLDER
+            else:
+                attr = self.colors.NORMAL
+
+            # Draw each column; do NOT clrtoeol to avoid erasing the properties pane
+            x_pos = left_pad
+            col_i = 0
+
+            # Icon
+            if icon_w:
+                consumed = self._draw_icon(y, x_pos, r, attr)
+                x_pos += consumed
+                col_i += 1
+
+            if getattr(self.options, "show_icons", True):
+                self.log_icon_debug(
+                    f"Drawing results with icons enabled, icon_w={icon_w}"
+                )
+
+            # Name
+            name_text = getattr(r, "filename", "")
+            safe_addstr(
+                self.stdscr,
+                y,
+                x_pos,
+                name_text[: widths[col_i]].ljust(widths[col_i]),
+                attr,
+            )
+            x_pos += widths[col_i] + 1
+            col_i += 1
+
+            # Size
+            if size_w and col_i < len(widths):
+                size_text = ""
+                try:
+                    if isinstance(r.size, int) and r.size > 0:
+                        size_text = self._format_size(r.size)
+                    elif isinstance(r.size, str):
+                        size_text = r.size
+                except Exception:
+                    size_text = ""
+                safe_addstr(
+                    self.stdscr,
+                    y,
+                    x_pos,
+                    size_text.rjust(widths[col_i])[: widths[col_i]],
+                    attr,
+                )
+                x_pos += widths[col_i] + 1
+                col_i += 1
+
+            # Modified
+            if date_w and col_i < len(widths):
+                dt = getattr(r, "date_modified", "") or ""
+                safe_addstr(
+                    self.stdscr,
+                    y,
+                    x_pos,
+                    dt[: widths[col_i]].ljust(widths[col_i]),
+                    attr,
+                )
+                x_pos += widths[col_i] + 1
+                col_i += 1
+
+            # Path (parent directory)
+            if col_i < len(widths):
+                full_path = getattr(r, "full_path", "") or ""
+                parent = os.path.dirname(full_path) if full_path else ""
+                safe_addstr(
+                    self.stdscr,
+                    y,
+                    x_pos,
+                    parent[: widths[col_i]].ljust(widths[col_i]),
+                    attr,
+                )
+
+        # ----- Scrollbar (skip if a Properties pane is visible to avoid overlap) -----
+        if len(self.results) > results_height and not getattr(
+            self, "props_visible", False
+        ):
+            self._draw_scrollbar(results_start_y, results_height)
+
+    def _draw_scrollbar(self, start_y: int, height: int):
+        """Draw a scrollbar on the right side"""
+        scrollbar_x = self.width - 1
+
+        # Calculate scrollbar position
+        total_results = len(self.results)
+        thumb_size = max(1, height * height // total_results)
+        thumb_pos = (
+            self.result_offset * (height - thumb_size) // max(1, total_results - height)
+        )
+
+        # Draw scrollbar track
+        for y in range(start_y, start_y + height):
+            self.stdscr.addch(y, scrollbar_x, "│", self.colors.INFO)
+
+        # Draw thumb
+        for y in range(start_y + thumb_pos, start_y + thumb_pos + thumb_size):
+            if y < start_y + height:
+                self.stdscr.addch(y, scrollbar_x, "█", self.colors.HIGHLIGHT)
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size according to current settings"""
+        if self.options.size_format == 0:  # Auto
+            if size_bytes < 1024:
+                return f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                return f"{size_bytes / 1024:.1f} KB"
+            elif size_bytes < 1024 * 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024):.1f} MB"
+            else:
+                return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+        elif self.options.size_format == 1:  # Bytes
+            return f"{size_bytes:,}"
+        elif self.options.size_format == 2:  # KB
+            return f"{size_bytes / 1024:.1f}"
+        elif self.options.size_format == 3:  # MB
+            return f"{size_bytes / (1024 * 1024):.1f}"
+        else:
+            return str(size_bytes)
+
+    def handle_input(self):
+        """Handle keyboard input"""
+        self.should_exit = False
+        key = self.stdscr.getch()
+
+        if key == -1:  # No input (timeout)
+            return
+
+        if self.debug_mode:
+            logging.debug(
+                f"Key pressed: {key} (0x{key:02x}) - '{chr(key) if 32 <= key <= 126 else '?'}'"
+            )
+            logging.debug(f"Current focus: {self.current_focus}")
+
+        try:
+            # Global shortcuts
+            if key == curses.KEY_F1 or key == ord("?"):
+                if self.debug_mode:
+                    logging.debug("F1/? pressed - showing help")
+                self.show_help()
+            elif key == curses.KEY_F2 or key == 15:  # F2 or Ctrl+O
+                if self.debug_mode:
+                    logging.debug("F2/Ctrl+O pressed - showing options")
+                self.show_options()
+            elif key == curses.KEY_F3 or key == 5:  # F3 or Ctrl+E
+                if self.debug_mode:
+                    logging.debug("F3/Ctrl+E pressed - export results")
+                self.export_results()
+            elif key == curses.KEY_F5 or key == 18:  # F5 or Ctrl+R
+                if self.debug_mode:
+                    logging.debug("F5/Ctrl+R pressed - perform search")
+                self.perform_search()
+            elif key == curses.KEY_F7:  # toggle show icons
+                self.options.show_icons = not self.options.show_icons
+                self.draw_interface()
+                return
+            elif key == curses.KEY_F8:  # toggle unicode/ascii
+                self.options.use_unicode_icons = not self.options.use_unicode_icons
+                self.draw_interface()
+                return
+            elif key == curses.KEY_F9:  # Test icon rendering
+                if getattr(self, "debug", False) or getattr(self, "debug_mode", False):
+                    logging.debug("F9 pressed - testing icon rendering")
+                    self.test_icon_rendering()
+                return
+            elif key == curses.KEY_F10 or key == 17:  # F10 or Ctrl+Q
+                if self.debug_mode:
+                    logging.debug("F10/Ctrl+Q pressed - exiting")
+                self.should_exit = True
+            elif key == ord("\t"):  # Tab
+                if self.debug_mode:
+                    logging.debug("Tab pressed - switching focus")
+                self.switch_focus()
+            elif key == 27:  # ESC
+                if self.debug_mode:
+                    logging.debug("ESC pressed - focus to search")
+                self.current_focus = "search"
+                self.draw_interface()
+
+            # Context-specific shortcuts
+            elif self.current_focus == "search":
+                self.handle_search_input(key)
+            elif self.current_focus == "results":
+                self.handle_results_input(key)
+
+        except Exception as e:
+            logging.error(f"Error handling key {key}: {str(e)}", exc_info=True)
+            if self.debug_mode:
+                self.status_message = f"Key handling error: {str(e)}"
+                self.draw_interface()
+
+    def show_help(self):
+        """Show help dialog"""
+        try:
+            if self.debug_mode:
+                logging.debug("Creating help dialog")
+
+            help_dialog = HelpDialog(self.stdscr)
+
+            if self.debug_mode:
+                logging.debug("Showing help dialog")
+
+            help_dialog.show()
+
+            if self.debug_mode:
+                logging.debug("Help dialog closed, redrawing interface")
+
+            self.draw_interface()
+
+        except Exception as e:
+            logging.error(f"Error in show_help: {str(e)}", exc_info=True)
+            self.status_message = f"Help error: {str(e)}"
+            self.draw_interface()
+
+    def _get_key_name(self, key: int) -> str:
+        """Get human-readable key name for debugging"""
+        key_names = {
+            curses.KEY_F1: "F1",
+            curses.KEY_F2: "F2",
+            curses.KEY_F3: "F3",
+            curses.KEY_F4: "F4",
+            curses.KEY_F5: "F5",
+            curses.KEY_F10: "F10",
+            curses.KEY_UP: "UP",
+            curses.KEY_DOWN: "DOWN",
+            curses.KEY_LEFT: "LEFT",
+            curses.KEY_RIGHT: "RIGHT",
+            curses.KEY_ENTER: "ENTER",
+            curses.KEY_BACKSPACE: "BACKSPACE",
+            curses.KEY_DC: "DELETE",
+            curses.KEY_HOME: "HOME",
+            curses.KEY_END: "END",
+            curses.KEY_PPAGE: "PAGE_UP",
+            curses.KEY_NPAGE: "PAGE_DOWN",
+            27: "ESC",
+            9: "TAB",
+            10: "ENTER",
+            13: "ENTER",
+            127: "BACKSPACE",
+            15: "Ctrl+O",
+            5: "Ctrl+E",
+            18: "Ctrl+R",
+            17: "Ctrl+Q",
+            8: "BACKSPACE",
+            330: "DELETE",
+        }
+
+        if key in key_names:
+            return key_names[key]
+        elif 32 <= key <= 126:
+            return f"'{chr(key)}'"
+        else:
+            return f"UNKNOWN({key})"
+
+    def handle_search_input(self, key):
+        """Handle input when the search field is focused.
+
+        Works across Windows terminals by accepting multiple keycodes for Backspace,
+        Delete, and Enter. Keeps cursor within bounds and redraws after each edit.
+        """
+        # Normalize cursor in case the field length changed elsewhere
+        if self.cursor_pos > len(self.search_field):
+            self.cursor_pos = len(self.search_field)
+        if self.cursor_pos < 0:
+            self.cursor_pos = 0
+
+        # ---- Key groups (don’t require global constants) ----
+        BACKSPACE_KEYS = {curses.KEY_BACKSPACE, 8, 127}  # 8=Ctrl-H, 127=DEL
+        ENTER_KEYS = {curses.KEY_ENTER, 10, 13}  # LF/CR
+        DELETE_KEYS = {curses.KEY_DC, 330}  # many builds map KEY_DC to 330
+
+        # ---- Actions ----
+        if key in ENTER_KEYS:
+            # Start a search immediately
+            self.perform_search()
+            return
+
+        elif key in BACKSPACE_KEYS:
+            if self.cursor_pos > 0:
+                self.search_field = (
+                    self.search_field[: self.cursor_pos - 1]
+                    + self.search_field[self.cursor_pos :]
+                )
+                self.cursor_pos -= 1
+                self.draw_interface()
+            return
+
+        elif key in DELETE_KEYS:
+            if self.cursor_pos < len(self.search_field):
+                self.search_field = (
+                    self.search_field[: self.cursor_pos]
+                    + self.search_field[self.cursor_pos + 1 :]
+                )
+                self.draw_interface()
+            return
+
+        elif key == curses.KEY_LEFT:
+            self.cursor_pos = max(0, self.cursor_pos - 1)
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_RIGHT:
+            self.cursor_pos = min(len(self.search_field), self.cursor_pos + 1)
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_HOME:
+            self.cursor_pos = 0
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_END:
+            self.cursor_pos = len(self.search_field)
+            self.draw_interface()
+            return
+
+        # --- Optional, familiar shortcuts ---
+        elif key == 21:  # Ctrl+U  (kill to start)
+            self.search_field = self.search_field[self.cursor_pos :]
+            self.cursor_pos = 0
+            self.draw_interface()
+            return
+
+        elif key == 11:  # Ctrl+K  (kill to end)
+            self.search_field = self.search_field[: self.cursor_pos]
+            self.draw_interface()
+            return
+
+        elif key == 23:  # Ctrl+W  (delete previous word)
+            import re
+
+            left = self.search_field[: self.cursor_pos]
+            left2 = re.sub(r"\s*\w+\Z", "", left)
+            # update after computing left2 to set correct cursor
+            self.cursor_pos = len(left2)
+            self.search_field = (
+                left2 + self.search_field[self.cursor_pos + (len(left) - len(left2)) :]
+            )
+            # Simpler: just rebuild
+            self.search_field = left2 + self.search_field[len(left) :]
+            self.draw_interface()
+            return
+
+        # Printable characters (accept extended ASCII too)
+        elif 32 <= key <= 255:
+            self.search_field = (
+                self.search_field[: self.cursor_pos]
+                + chr(key)
+                + self.search_field[self.cursor_pos :]
+            )
+            self.cursor_pos += 1
+            self.draw_interface()
+            return
+
+        # Ignore everything else (function keys are handled in handle_input)
+        return
+
+    def handle_results_input(self, key):
+        """Handle keys while the results table has focus.
+
+        Enter: open selected
+        Space: toggle Properties pane
+        F6 / x / X: show ExifTool metadata (if integrated)
+        Arrows / PgUp / PgDn / Home / End: navigate
+        o / O: open selected
+        """
+        if not self.results:
+            return
+
+        ENTER_KEYS = {curses.KEY_ENTER, 10, 13}
+        EXIF_KEYS = {curses.KEY_F6, ord("x"), ord("X")}
+
+        def _refresh_props_if_open():
+            # Rebuild the Properties pane for the new selection without changing visibility.
+            if getattr(self, "props_visible", False):
+                self.toggle_properties()
+                self.toggle_properties()
+
+        # Actions
+        if key in ENTER_KEYS:
+            self.open_selected()
+            return
+
+        elif key == ord(" "):  # Space toggles properties pane
+            self.toggle_properties()
+            return
+
+        elif key in EXIF_KEYS:  # Show PyExifTool metadata dialog
+            self.show_exif_metadata()
+            return
+
+        elif key in (ord("o"), ord("O")):  # 'o' also opens
+            self.open_selected()
+            return
+
+        # Navigation
+        elif key in (curses.KEY_UP, ord("k")):
+            if self.current_result > 0:
+                self.current_result -= 1
+                if self.current_result < self.result_offset:
+                    self.result_offset = self.current_result
+                _refresh_props_if_open()
+                self.draw_interface()
+            return
+
+        elif key in (curses.KEY_DOWN, ord("j")):
+            if self.current_result < len(self.results) - 1:
+                self.current_result += 1
+                visible_rows = max(1, self.height - 6)
+                if self.current_result >= self.result_offset + visible_rows:
+                    self.result_offset = self.current_result - visible_rows + 1
+                _refresh_props_if_open()
+                self.draw_interface()
+            return
+
+        elif key == curses.KEY_PPAGE:
+            visible_rows = max(1, self.height - 6)
+            self.current_result = max(0, self.current_result - visible_rows)
+            self.result_offset = max(0, self.result_offset - visible_rows)
+            _refresh_props_if_open()
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_NPAGE:
+            visible_rows = max(1, self.height - 6)
+            self.current_result = min(
+                len(self.results) - 1, self.current_result + visible_rows
+            )
+            self.result_offset = min(
+                max(0, len(self.results) - visible_rows),
+                self.result_offset + visible_rows,
+            )
+            _refresh_props_if_open()
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_HOME:
+            self.current_result = 0
+            self.result_offset = 0
+            _refresh_props_if_open()
+            self.draw_interface()
+            return
+
+        elif key == curses.KEY_END:
+            self.current_result = max(0, len(self.results) - 1)
+            visible_rows = max(1, self.height - 6)
+            self.result_offset = max(0, len(self.results) - visible_rows)
+            _refresh_props_if_open()
+            self.draw_interface()
+            return
+
+        # Ignore everything else while in results mode
+        return
+
+    def switch_focus(self):
+        """Switch focus between search field and results"""
+        if self.current_focus == "search":
+            self.current_focus = "results"
+        else:
+            self.current_focus = "search"
+        self.draw_interface()
+
+    def perform_search(self):
+        """Execute search in a separate thread"""
+        if not self.search_field.strip():
+            self.status_message = "Enter a search term"
+            self.draw_interface()
+            return
+
+        self.options.query = self.search_field.strip()
+        self.search_active = True
+        self.status_message = "Searching..."
+        self.draw_interface()
+
+        # Execute search in thread to avoid blocking UI
+        def search_thread():
+            try:
+                results, error = self.executor.execute_search(self.options)
+                self.results = results
+                self.current_result = 0
+                self.result_offset = 0
+                self.search_active = False
+                self._ui_dirty = True  # <-- force a redraw even if no key was pressed
+                self.status_message = (
+                    f"Error: {error}" if error else f"Found {len(results)} results"
+                )
+            except Exception as e:
+                self.search_active = False
+                self._ui_dirty = True
+                self.status_message = f"Search failed: {str(e)}"
+
+        threading.Thread(target=search_thread, daemon=True).start()
+
+    def show_debug_log(self):
+        """Show debug log dialog (debug mode only)"""
+        if not self.debug or not self.debug_log:
+            return
+
+        height, width = self.stdscr.getmaxyx()
+        dialog_height = min(len(self.debug_log) + 6, height - 2)
+        dialog_width = min(
+            max(80, max(len(line) for line in self.debug_log[-20:]) + 4), width - 4
+        )
+        start_y = (height - dialog_height) // 2
+        start_x = (width - dialog_width) // 2
+
+        dialog_win = curses.newwin(dialog_height, dialog_width, start_y, start_x)
+        dialog_panel = panel.new_panel(dialog_win)
+
+        scroll_pos = max(0, len(self.debug_log) - (dialog_height - 4))
+
+        while True:
+            dialog_win.clear()
+            dialog_win.box()
+
+            # Title
+            title = " Debug Log (F4 in debug mode) "
+            title_x = (dialog_width - len(title)) // 2
+            dialog_win.addstr(0, title_x, title, self.colors.HEADER)
+
+            # Display debug messages
+            visible_lines = dialog_height - 4
+            for i, line in enumerate(
+                self.debug_log[scroll_pos : scroll_pos + visible_lines]
+            ):
+                y = i + 2
+                dialog_win.addstr(y, 2, line[: dialog_width - 4], self.colors.INFO)
+
+            # Instructions
+            instructions = "↑↓: Scroll | Esc: Close"
+            dialog_win.addstr(dialog_height - 2, 2, instructions)
+
+            panel.update_panels()
+            curses.doupdate()
+
+            key = dialog_win.getch()
+
+            if key == 27:  # ESC
+                break
+            elif key == curses.KEY_UP:
+                scroll_pos = max(0, scroll_pos - 1)
+            elif key == curses.KEY_DOWN:
+                scroll_pos = min(len(self.debug_log) - visible_lines, scroll_pos + 1)
+
+        del dialog_panel
+        del dialog_win
+        self.stdscr.clear()
+        self.draw_interface()
+
+    def show_options(self):
+        try:
+            logging.debug("show_options(): creating dialog")
+            dlg = OptionsDialog(self.stdscr, self.options)
+            ok = dlg.show()
+            logging.debug(f"show_options(): dialog returned {ok}")
+        except Exception:
+            logging.error("show_options(): fatal", exc_info=True)
+            self.status_message = "Options error (see log)"
+        finally:
+            self.draw_interface()
+
+    def export_results(self):
+        """Show export dialog and export results"""
+        if not self.results:
+            self.status_message = "No results to export"
+            self.draw_interface()
+            return
+
+        export_dialog = ExportDialog(self.stdscr, self.results)
+        result = export_dialog.show()
+
+        if result:
+            format_type, filename = result
+            success = self.executor.export_results(
+                self.results, format_type, filename, self.options
+            )
+
+            if success:
+                self.status_message = f"Results exported to {filename}"
+            else:
+                self.status_message = f"Export failed"
+
+        self.draw_interface()
+
+    def open_selected_result(self):
+        """Open the currently selected result"""
+        if not self.results or self.current_result >= len(self.results):
+            return
+
+        result = self.results[self.current_result]
+
+        try:
+            if os.name == "nt":  # Windows
+                os.startfile(result.full_path)
+            elif os.name == "posix":  # Unix/Linux/Mac
+                subprocess.run(["xdg-open", result.full_path])
+
+            self.status_message = f"Opened: {result.filename}"
+        except Exception as e:
+            self.status_message = f"Failed to open: {str(e)}"
+
+        self.draw_interface()
+
+    def preview_selected_result(self):
+        """Show preview dialog for selected result"""
+        if not self.results or self.current_result >= len(self.results):
+            return
+
+        result = self.results[self.current_result]
+
+        # Create preview dialog
+        preview_text = [
+            f"Name: {result.filename}",
+            f"Path: {result.full_path}",
+            f"Type: {'Folder' if result.is_folder else 'File'}",
+        ]
+
+        if result.size > 0:
+            preview_text.append(f"Size: {self._format_size(result.size)}")
+
+        if result.date_modified:
+            preview_text.append(f"Modified: {result.date_modified}")
+
+        if result.date_created:
+            preview_text.append(f"Created: {result.date_created}")
+
+        if result.attributes:
+            preview_text.append(f"Attributes: {result.attributes}")
+
+        # Show simple preview dialog
+        self._show_message_dialog("File Information", preview_text)
+        self.draw_interface()
+
+    def _show_message_dialog(self, title: str, lines: List[str]):
+        """Show a simple message dialog"""
+        height, width = self.stdscr.getmaxyx()
+        dialog_height = min(len(lines) + 4, height - 4)
+        dialog_width = min(max(len(line) for line in lines) + 4, width - 4)
+        start_y = (height - dialog_height) // 2
+        start_x = (width - dialog_width) // 2
+
+        dialog_win = curses.newwin(dialog_height, dialog_width, start_y, start_x)
+        dialog_panel = panel.new_panel(dialog_win)
+
+        dialog_win.clear()
+        dialog_win.box()
+
+        # Title
+        title_x = (dialog_width - len(title) - 2) // 2
+        dialog_win.addstr(0, title_x, f" {title} ", self.colors.HEADER)
+
+        # Content
+        for i, line in enumerate(lines):
+            if i < dialog_height - 4:
+                dialog_win.addstr(i + 2, 2, line, self.colors.NORMAL)
+
+        # Instructions
+        dialog_win.addstr(dialog_height - 2, 2, "Press any key to close...")
+
+        panel.update_panels()
+        curses.doupdate()
+
+        dialog_win.getch()  # Wait for key press
+
+        del dialog_panel
+        del dialog_win
+
+    def open_selected(self):
+        """Open the currently highlighted search result with the default app."""
+        try:
+            if not self.results:
+                self.status_message = "No results to open"
+                self._ui_dirty = True
+                return
+
+            idx = max(0, min(self.current_result, len(self.results) - 1))
+            sel = self.results[idx]
+            path = getattr(sel, "full_path", None) or getattr(sel, "path", None) or ""
+
+            if not path:
+                self.status_message = "Internal error: no path for selection"
+                self._ui_dirty = True
+                return
+
+            ok = open_with_default_app(path)
+            base = os.path.basename(path.rstrip("\\/"))
+            self.status_message = f"Opened: {base}" if ok else f"Open failed: {base}"
+        except Exception as e:
+            logging.error(f"open_selected() failed: {e}", exc_info=True)
+            self.status_message = "Open failed (see log)"
+        finally:
+            # Ensure UI refreshes even if no key was pressed after Enter
+            self._ui_dirty = True
+            self.draw_interface()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ES TUI - Everything Search Text User Interface"
+    )
+    parser.add_argument(
+        "--es-path",
+        default="es.exe",
+        help="Path to es.exe executable (default: es.exe)",
+    )
+    parser.add_argument("--query", help="Initial search query")
+    parser.add_argument(
+        "--debug", action="store_true", help="Enable debug mode with detailed logging"
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument(
+        "--log-file",
+        default="es_tui_debug.log",
+        help="Debug log file path (default: es_tui_debug.log)",
+    )
+
+    parser.add_argument(
+        "--exiftool-path",
+        default=None,
+        help="Path to exiftool executable (exiftool.exe). If omitted, it must be on PATH.",
+    )
+
+    args = parser.parse_args()
+
+    # Setup logging – force reconfigure and write UTF-8 to file on Windows
+    log_level = (
+        logging.DEBUG
+        if args.debug
+        else (logging.INFO if args.verbose else logging.WARNING)
+    )
+
+    handlers = []
+
+    if args.debug:
+        # Ensure file handler uses UTF-8 to safely log emoji
+        fh = logging.FileHandler(args.log_file, encoding="utf-8")
+        handlers.append(fh)
+
+    if args.verbose:
+        # Console output may still be cp1252; avoid emitting emoji there
+        sh = logging.StreamHandler()
+
+        class _AsciiSafeFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                try:
+                    (sys.stdout.encoding or "utf-8")
+                    record.getMessage().encode(sys.stdout.encoding or "utf-8")
+                    return True
+                except Exception:
+                    # Fallback: replace non-encodables so we never crash the console
+                    record.msg = (
+                        record.getMessage()
+                        .encode("ascii", "backslashreplace")
+                        .decode("ascii")
+                    )
+                    record.args = ()
+                    return True
+
+        sh.addFilter(_AsciiSafeFilter())
+        handlers.append(sh)
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+        force=True,  # IMPORTANT: drop any pre-existing handlers from libraries
+    )
+
+    if args.debug:
+        print(f"Debug mode enabled. Logging to: {args.log_file}")
+
+    def run_tui(stdscr):
+        try:
+            tui = ESTUI(
+                stdscr,
+                args.es_path,
+                args.debug,
+                args.verbose,
+                exiftool_path=args.exiftool_path,
+            )
+            tui.log_debug("TUI initialized")
+
+            # Set initial query if provided
+            if args.query:
+                tui.search_field = args.query
+                tui.cursor_pos = len(args.query)
+                tui.log_debug(f"Initial query set: {args.query}")
+
+            tui.run()
+
+        except KeyboardInterrupt:
+            pass  # Clean exit on Ctrl+C
+        except Exception as e:
+            # Show error and wait for keypress
+            stdscr.clear()
+            if args.debug or args.verbose:
+                import traceback
+
+                error_info = traceback.format_exc()
+                lines = error_info.split("\n")
+                for i, line in enumerate(lines[:20]):  # Show first 20 lines
+                    stdscr.addstr(i, 0, line[: stdscr.getmaxyx()[1] - 1])
+                stdscr.addstr(
+                    min(21, stdscr.getmaxyx()[0] - 2), 0, "Press any key to exit..."
+                )
+            else:
+                stdscr.addstr(0, 0, f"Error: {str(e)}")
+                stdscr.addstr(
+                    1, 0, "Press any key to exit... (use --debug for more info)"
+                )
+            stdscr.getch()
+
+    # Verify ES executable exists
+    def find_executable(name):
+        """Find executable in PATH"""
+        import shutil
+
+        return shutil.which(name) is not None
+
+    if args.es_path == "es.exe":
+        if not find_executable("es.exe") and not os.path.isfile("es.exe"):
+            print(f"Warning: es.exe not found in PATH or current directory.")
+            print(
+                "Make sure es.exe is in your PATH or specify the correct path with --es-path"
+            )
+            print("Download from: https://www.voidtools.com/downloads/")
+            print()
+
+            response = input("Continue anyway? (y/N): ")
+            if response.lower() != "y":
+                sys.exit(1)
+    elif not os.path.isfile(args.es_path):
+        print(f"Error: Specified es.exe path not found: {args.es_path}")
+        sys.exit(1)
+
+    # Initialize curses and run TUI
+    try:
+        curses.wrapper(run_tui)
+    except Exception as e:
+        print(f"Failed to initialize TUI: {e}")
+        sys.exit(1)
+
+
+# ---------- safer screen write ----------
+def safe_addstr(win, y, x, text, attr=0):
+    """Write within bounds with detailed error logging."""
+    try:
+        height, width = win.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= width:
+            logging.debug(
+                f"safe_addstr: Position ({y},{x}) out of bounds {height}x{width}"
+            )
+            return
+
+        # Leave last column alone (Windows quirk)
+        maxlen = max(0, width - x - 1)
+        if maxlen <= 0:
+            logging.debug(f"safe_addstr: No space available at ({y},{x})")
+            return
+
+        display_text = str(text)[:maxlen]
+        try:
+            display_text.encode(sys.stdout.encoding or "utf-8", errors="replace")
+        except Exception as enc_e:
+            logging.debug(f"safe_addstr: Encoding failed for {repr(text)}: {enc_e}")
+            display_text = (
+                str(text)[:maxlen].encode("ascii", errors="replace").decode("ascii")
+            )
+
+        win.addstr(y, x, display_text, attr)
+
+    except Exception as e:
+        logging.debug(f"safe_addstr FAILED at ({y},{x}) with {repr(text)}: {e}")
+        try:
+            # last-ditch: strip zero-width/FEFF and write without attrs
+            fallback = str(text)[:maxlen].replace("\u200b", "").replace("\ufeff", "")
+            win.addstr(y, x, fallback)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()
