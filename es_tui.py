@@ -352,14 +352,22 @@ def gather_file_properties(path: str) -> Dict[str, str]:
 def open_with_default_app(path: str) -> bool:
     """Open a file/folder with the OS default application. Non-blocking."""
     try:
+        # Normalize the path and handle encoding issues
+        normalized_path = os.path.normpath(path)
+
+        # Check if file actually exists before trying to open
+        if not os.path.exists(normalized_path):
+            logging.error(f"File does not exist: {normalized_path}")
+            return False
+
         if sys.platform.startswith("win"):
-            # Equivalent to: start "" "<path>" → uses Shell file associations
-            os.startfile(path)  # type: ignore[attr-defined]
+            # On Windows, use os.startfile with proper path handling
+            os.startfile(normalized_path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
+            subprocess.Popen(["open", normalized_path])
         else:
-            subprocess.Popen(["xdg-open", path])
-        logging.debug(f"Opened with default app: {path}")
+            subprocess.Popen(["xdg-open", normalized_path])
+        logging.debug(f"Opened with default app: {normalized_path}")
         return True
     except Exception as e:
         logging.error(f"Open failed for {path}: {e}", exc_info=True)
@@ -3759,6 +3767,13 @@ class ESTUI:
             if not path:
                 self.status_message = "Internal error: no path for selection"
                 self._ui_dirty = True
+                return
+
+            # Check if file exists before attempting to open
+            if not os.path.exists(path):
+                self.status_message = f"File not found: {os.path.basename(path)}"
+                self._ui_dirty = True
+                logging.warning(f"File not found when trying to open: {path}")
                 return
 
             ok = open_with_default_app(path)
