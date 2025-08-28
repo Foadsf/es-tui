@@ -1542,17 +1542,50 @@ class ESTUI:
                 self._ui_dirty = True
                 return
             try:
-                # If exiftool.exe is not on PATH, allow overriding via --exiftool-path.
-                # PyExifTool lets you specify the executable path this way. :contentReference[oaicite:3]{index=3}
-                kw = {}
+                # Configure PyExifTool for proper UTF-8 handling on Windows
+                kw = {
+                    "encoding": "utf-8",  # Force UTF-8 encoding
+                    "common_args": [
+                        "-charset",
+                        "utf8",
+                    ],  # Tell ExifTool to output UTF-8
+                }
+
                 if self.exiftool_path:
                     kw["executable"] = self.exiftool_path
 
-                # ExifToolHelper is the high-level interface; get_metadata returns list[dict]. :contentReference[oaicite:4]{index=4}
                 with exiftool.ExifToolHelper(**kw) as et:
                     out = et.get_metadata(path)
                 data = out[0] if out else {"Error": "No metadata returned"}
                 self.exif_cache[path] = data
+
+            except UnicodeDecodeError as ue:
+                logging.error(f"Unicode decode error for {path}: {ue}", exc_info=True)
+                # Fallback: try with error handling
+                try:
+                    kw_fallback = {
+                        "encoding": "utf-8",
+                        "common_args": [
+                            "-charset",
+                            "utf8",
+                            "-overwrite_original_in_place",
+                        ],
+                    }
+                    if self.exiftool_path:
+                        kw_fallback["executable"] = self.exiftool_path
+
+                    with exiftool.ExifToolHelper(**kw_fallback) as et:
+                        # Try with fewer parameters
+                        out = et.get_metadata([path])
+                    data = out[0] if out else {"Error": "Unicode decode failed"}
+                    self.exif_cache[path] = data
+                except Exception as e2:
+                    logging.error(
+                        f"Fallback ExifTool failed for {path}: {e2}", exc_info=True
+                    )
+                    data = {"Error": f"ExifTool encoding error: {str(ue)[:100]}..."}
+                    self.exif_cache[path] = data
+
             except Exception as e:
                 logging.error(f"ExifTool error: {e}", exc_info=True)
                 self.status_message = "ExifTool failed (see log)"
@@ -1567,14 +1600,19 @@ class ESTUI:
             if k == "SourceFile":
                 continue
             v = data[k]
-            # normalize values
-            if isinstance(v, (list, tuple)):
-                v = ", ".join(str(x) for x in v)
-            elif isinstance(v, dict):
-                v = json.dumps(v, ensure_ascii=False)
-            else:
-                v = str(v)
-            lines.append(f"{k} = {v}")
+            # normalize values with better Unicode handling
+            try:
+                if isinstance(v, (list, tuple)):
+                    v = ", ".join(str(x) for x in v)
+                elif isinstance(v, dict):
+                    v = json.dumps(v, ensure_ascii=False)
+                else:
+                    v = str(v)
+                lines.append(f"{k} = {v}")
+            except UnicodeEncodeError:
+                # Handle problematic Unicode characters
+                v_safe = str(v).encode("ascii", "backslashreplace").decode("ascii")
+                lines.append(f"{k} = {v_safe}")
 
         title = "ExifTool Metadata"
         self._show_scroll_dialog(title, lines)
@@ -2624,6 +2662,12 @@ class ESTUI:
 
 
 def main():
+    # Force UTF-8 encoding for ExifTool on Windows
+    if sys.platform.startswith("win"):
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+        # Ensure ExifTool uses UTF-8
+        os.environ.setdefault("EXIFTOOL_ENCODING", "UTF-8")
+
     parser = argparse.ArgumentParser(
         description="ES TUI - Everything Search Text User Interface"
     )
