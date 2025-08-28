@@ -1405,7 +1405,7 @@ class ESTUI:
         self.status_message = "Ready"
         self.search_active = False
         self.current_focus = "search"  # "search" or "results"
-        self.debug = debug
+        self.debug_mode = debug  # The state variable to toggle
         self.verbose = verbose
         self.debug_log = []  # Store debug messages
         self.spinner_frames = ["|", "/", "-", "\\"]
@@ -1430,14 +1430,11 @@ class ESTUI:
         self.height, self.width = self.stdscr.getmaxyx()
 
         # Debug logging
-        self.debug_mode = logging.getLogger().isEnabledFor(logging.DEBUG)
         if self.debug_mode:
             logging.debug("TUI initialized")
             logging.debug(f"Terminal size: {self.height}x{self.width}")
             logging.debug(f"ES path: {es_path}")
-
-        if getattr(self, "debug", False):
-            self.detect_terminal_capabilities()
+            self.detect_terminal_capabilities()  # This method will now use self.debug_mode
 
         # Initialize UI components
         self.height, self.width = self.stdscr.getmaxyx()
@@ -1447,7 +1444,7 @@ class ESTUI:
         # Create status bar
         self.status_bar = StatusBar(self.stdscr, self.height - 1)
 
-        if self.debug:
+        if self.debug_mode:
             self.log_debug(f"TUI initialized with debug mode enabled")
             self.log_debug(f"Terminal size: {self.width}x{self.height}")
             self.log_debug(f"ES path: {es_path}")
@@ -1813,7 +1810,7 @@ class ESTUI:
 
     def log_debug(self, message: str):
         """Log debug message with timestamp"""
-        if self.debug:
+        if self.debug_mode:
             timestamp = time.strftime("%H:%M:%S")
             debug_msg = f"[{timestamp}] {message}"
             self.debug_log.append(debug_msg)
@@ -1864,16 +1861,7 @@ class ESTUI:
         self.draw_results()
 
         # Draw help line
-        help_text = "F1:Help F2:Options F3:Export"
-        # Add F4 to the help text
-        # if self.debug:
-        #     help_text += " F4:Debug"
-        # else:
-        help_text += " F4:Advanced"
-        help_text += " F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode"
-        if getattr(self, "debug", False) or getattr(self, "debug_mode", False):
-            help_text += "  F9:IconTest"
-        help_text += " F10:Quit Tab:Switch ESC:Search"
+        help_text = "F1:Help F2:Options F3:Export F4:Advanced F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode F9:Debug F10:Quit Tab:Switch ESC:Search"
         self.stdscr.addstr(
             self.height - 2, 0, help_text[: self.width - 1], self.colors.INFO
         )
@@ -2198,7 +2186,6 @@ class ESTUI:
                 if self.debug_mode:
                     logging.debug("F3/Ctrl+E pressed - export results")
                 self.export_results()
-            # F4 shortcut for advanced search
             elif key == curses.KEY_F4:
                 self.show_advanced_search()
                 return
@@ -2212,6 +2199,16 @@ class ESTUI:
                 return
             elif key == curses.KEY_F8:  # toggle unicode/ascii
                 self.options.use_unicode_icons = not self.options.use_unicode_icons
+                self.draw_interface()
+                return
+            elif key == curses.KEY_F9:  # Toggle debug mode
+                self.debug_mode = not self.debug_mode
+                if self.debug_mode:
+                    logging.basicConfig(level=logging.DEBUG)  # Reactivate debug logging
+                    logging.debug("Debug mode activated by F9.")
+                else:
+                    logging.basicConfig(level=logging.INFO)  # Deactivate debug logging
+                    logging.info("Debug mode deactivated by F9.")
                 self.draw_interface()
                 return
             elif key == curses.KEY_F10 or key == 17:  # F10 or Ctrl+Q
@@ -2544,7 +2541,7 @@ class ESTUI:
 
     def show_debug_log(self):
         """Show debug log dialog (debug mode only)"""
-        if not self.debug or not self.debug_log:
+        if not self.debug_mode or not self.debug_log:
             return
 
         height, width = self.stdscr.getmaxyx()
@@ -2848,6 +2845,9 @@ def main():
         except KeyboardInterrupt:
             pass  # Clean exit on Ctrl+C
         except Exception as e:
+            # Log the error first
+            logging.error(f"Fatal TUI error: {e}", exc_info=True)
+
             # Show error and wait for keypress
             stdscr.clear()
             if args.debug or args.verbose:
@@ -2866,6 +2866,9 @@ def main():
                     1, 0, "Press any key to exit... (use --debug for more info)"
                 )
             stdscr.getch()
+
+            # Re-raise the exception so it appears in the terminal after curses cleanup
+            raise
 
     # Verify ES executable exists
     def find_executable(name):
