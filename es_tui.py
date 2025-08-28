@@ -435,6 +435,24 @@ class SearchResult:
     is_folder: bool = False
 
 
+@dataclass
+class AdvancedSearchOptions:
+    """Dataclass to hold the state of the advanced search form."""
+
+    all_words: str = ""
+    exact_phrase: str = ""
+    one_of_words: str = ""
+    none_of_words: str = ""
+    file_extensions: str = ""
+    size_min: str = ""
+    size_max: str = ""
+    date_modified_min: str = ""
+    date_modified_max: str = ""
+    attributes_filter: str = ""
+    files_only: bool = False
+    folders_only: bool = False
+
+
 class Colors:
     def __init__(self):
         try:
@@ -870,9 +888,12 @@ class HelpDialog:
             "  F1, ?          - Show this help",
             "  F2, Ctrl+O     - Open search options",
             "  F3, Ctrl+E     - Export results",
+            "  F4             - Advanced Search",
             "  F5, Ctrl+R     - Refresh/new search",
+            "  F6, x          - Show EXIF metadata",
+            "  F7             - Toggle file icons",
+            "  F8             - Toggle Unicode/ASCII icons",
             "  F10, Ctrl+Q    - Quit",
-            "  Enter          - Open selected file/folder",
             "  Tab            - Focus next panel",
             "  Esc            - Return to search field",
             "",
@@ -882,9 +903,9 @@ class HelpDialog:
             "",
             "RESULTS LIST:",
             "  ↑↓ or j/k      - Navigate results",
-            "  Page Up/Down   - Scroll by page",
+            "  PgUp/PgDn      - Scroll by page",
             "  Home/End       - Go to first/last result",
-            "  Space          - Preview file info",
+            "  Space          - Toggle properties panel",
             "",
             "SEARCH MODES:",
             "  Normal         - Standard Everything search",
@@ -952,6 +973,167 @@ class HelpDialog:
                 self.stdscr.refresh()
             except:
                 pass
+
+
+class AdvancedSearchDialog:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        self.colors = Colors()
+        self.options = AdvancedSearchOptions()
+        self.fields = [
+            ("All these words:", "all_words"),
+            ("This exact phrase:", "exact_phrase"),
+            ("Any of these words:", "one_of_words"),
+            ("None of these words:", "none_of_words"),
+            ("File extensions (csv):", "file_extensions"),
+            ("Size (KB) min:", "size_min"),
+            ("Size (KB) max:", "size_max"),
+            ("Date Modified min:", "date_modified_min"),
+            ("Date Modified max:", "date_modified_max"),
+            ("Files only (Y/N):", "files_only"),
+            ("Folders only (Y/N):", "folders_only"),
+            ("Attributes filter:", "attributes_filter"),
+        ]
+        self.current_field_idx = 0
+        self.field_values = {
+            name: getattr(self.options, name) for _, name in self.fields
+        }
+        self.is_active = True
+
+    def build_query(self) -> str:
+        """Constructs a single es.exe query string from all fields."""
+        parts = []
+        if self.options.all_words:
+            parts.append(self.options.all_words)
+        if self.options.exact_phrase:
+            # Use double quotes to handle spaces
+            parts.append(f'"{self.options.exact_phrase}"')
+        if self.options.one_of_words:
+            # Use pipes for OR logic
+            or_query = " | ".join(shlex.split(self.options.one_of_words))
+            parts.append(f"({or_query})")
+        if self.options.none_of_words:
+            # Use minus for exclusion
+            none_query = " ".join(
+                [f"-{word}" for word in shlex.split(self.options.none_of_words)]
+            )
+            parts.append(none_query)
+        if self.options.file_extensions:
+            ext_query = " ".join(
+                [
+                    f"ext:{ext.strip()}"
+                    for ext in self.options.file_extensions.split(",")
+                ]
+            )
+            parts.append(ext_query)
+        if self.options.size_min:
+            parts.append(f"size:>{self.options.size_min}kb")
+        if self.options.size_max:
+            parts.append(f"size:<{self.options.size_max}kb")
+        if self.options.date_modified_min:
+            # Note: TUI would need date parsing logic here. For simplicity, we just pass the string.
+            parts.append(f"dm:>={self.options.date_modified_min}")
+        if self.options.date_modified_max:
+            parts.append(f"dm:<={self.options.date_modified_max}")
+        if self.options.files_only:
+            parts.append("/a-d")
+        elif self.options.folders_only:
+            parts.append("/ad")
+        if self.options.attributes_filter:
+            parts.append(f"attributes:{self.options.attributes_filter}")
+
+        return " ".join(parts)
+
+    def show(self) -> Optional[str]:
+        """Draws the advanced search dialog and handles input."""
+        H, W = self.stdscr.getmaxyx()
+        dialog_h = len(self.fields) + 7
+        dialog_w = min(80, W - 4)
+        y0 = (H - dialog_h) // 2
+        x0 = (W - dialog_w) // 2
+
+        win = curses.newwin(dialog_h, dialog_w, y0, x0)
+        win.keypad(True)
+
+        while self.is_active:
+            win.clear()
+            win.box()
+            title = " Advanced Search "
+            tx = (dialog_w - len(title)) // 2
+            safe_addstr(win, 0, tx, title, self.colors.HEADER)
+
+            for i, (label, name) in enumerate(self.fields):
+                attr = self.colors.NORMAL
+                field_val = getattr(self.options, name)
+
+                # Checkbox for boolean fields
+                if isinstance(field_val, bool):
+                    label = f"{label} [{'X' if field_val else ' '}]"
+
+                safe_addstr(win, i + 2, 2, label, attr)
+
+                if i == self.current_field_idx:
+                    attr = self.colors.SELECTED
+                    # Draw a reversed background for the selected field
+                    field_w = dialog_w - len(label) - 4
+                    if not isinstance(field_val, bool):
+                        safe_addstr(win, i + 2, 2 + len(label), " " * (field_w), attr)
+
+                # Draw value
+                if not isinstance(field_val, bool):
+                    safe_addstr(win, i + 2, 2 + len(label), str(field_val), attr)
+
+            # Footer
+            footer_text = "Enter:Next/Toggle | Esc:Cancel | F5:Search"
+            safe_addstr(win, dialog_h - 2, 2, footer_text, self.colors.INFO)
+
+            win.refresh()
+            key = win.getch()
+
+            if key == 27:  # ESC
+                return None
+            elif key == curses.KEY_F5:
+                return self.build_query()
+            elif key in (curses.KEY_ENTER, 10, 13):
+                current_field_name = self.fields[self.current_field_idx][1]
+                if isinstance(getattr(self.options, current_field_name), bool):
+                    setattr(
+                        self.options,
+                        current_field_name,
+                        not getattr(self.options, current_field_name),
+                    )
+                else:
+                    self.current_field_idx = (self.current_field_idx + 1) % len(
+                        self.fields
+                    )
+            elif key == curses.KEY_UP:
+                self.current_field_idx = (
+                    self.current_field_idx - 1 + len(self.fields)
+                ) % len(self.fields)
+            elif key == curses.KEY_DOWN:
+                self.current_field_idx = (self.current_field_idx + 1) % len(self.fields)
+            elif key in BACKSPACE_KEYS:
+                current_field_name = self.fields[self.current_field_idx][1]
+                current_val = getattr(self.options, current_field_name)
+                if current_val:
+                    setattr(self.options, current_field_name, current_val[:-1])
+            elif 32 <= key < 127:  # Printable ASCII
+                current_field_name = self.fields[self.current_field_idx][1]
+                if isinstance(getattr(self.options, current_field_name), str):
+                    setattr(
+                        self.options,
+                        current_field_name,
+                        getattr(self.options, current_field_name) + chr(key),
+                    )
+
+        try:
+            win.erase()
+            win.refresh()
+            self.stdscr.touchwin()
+            self.stdscr.refresh()
+        except Exception:
+            pass
+        return None
 
 
 class ExportDialog:
@@ -1269,6 +1451,19 @@ class ESTUI:
             self.log_debug(f"TUI initialized with debug mode enabled")
             self.log_debug(f"Terminal size: {self.width}x{self.height}")
             self.log_debug(f"ES path: {es_path}")
+
+    def show_advanced_search(self):
+        """Show the advanced search dialog and apply the generated query."""
+        logging.debug("F4 pressed - showing advanced search panel")
+        self.current_focus = "search"
+        self.draw_interface()
+        dialog = AdvancedSearchDialog(self.stdscr)
+        new_query = dialog.show()
+
+        if new_query is not None:
+            self.search_field = new_query
+            self.cursor_pos = len(new_query)
+            self.perform_search()
 
     def test_terminal_unicode_direct(self):
         """Direct terminal Unicode test – writes a few emoji to the screen, then shows a report."""
@@ -1778,8 +1973,11 @@ class ESTUI:
 
         # Draw help line
         help_text = "F1:Help F2:Options F3:Export"
-        if self.debug:
-            help_text += " F4:Debug"
+        # Add F4 to the help text
+        # if self.debug:
+        #     help_text += " F4:Debug"
+        # else:
+        help_text += " F4:Advanced"
         help_text += " F5:Search F6:EXIF F7:Icons F8:ASCII/Unicode"
         if getattr(self, "debug", False) or getattr(self, "debug_mode", False):
             help_text += "  F9:IconTest"
@@ -2113,6 +2311,10 @@ class ESTUI:
                 if self.debug_mode:
                     logging.debug("F3/Ctrl+E pressed - export results")
                 self.export_results()
+            # F4 shortcut for advanced search
+            elif key == curses.KEY_F4:
+                self.show_advanced_search()
+                return
             elif key == curses.KEY_F5 or key == 18:  # F5 or Ctrl+R
                 if self.debug_mode:
                     logging.debug("F5/Ctrl+R pressed - perform search")
