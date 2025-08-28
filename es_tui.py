@@ -2550,7 +2550,7 @@ class ESTUI:
             curses.curs_set(0)
 
     def draw_results(self):
-        """Draw the results list with an optional icon column.
+        """Draw the results list with an optional icon and extension column.
         Respects the right-side Properties pane if visible.
         """
         results_start_y = 4
@@ -2596,7 +2596,6 @@ class ESTUI:
         # Name column
         name_w = min(40, effective_width // 3)
         # Remaining width (header area includes left padding)
-        # layout: [pad] [icon] [name] [size?] [date?] [path]
         remaining = (
             effective_width - left_pad - icon_w - name_w - 1
         )  # -1 space after name
@@ -2626,6 +2625,14 @@ class ESTUI:
             widths.append(date_w)
             remaining -= date_w + 1
 
+        # Dedicated extension column (optional)
+        ext_w = 0
+        if getattr(self.options, "show_extension", True) and remaining > 7:
+            ext_w = 6
+            headers.append("Ext")
+            widths.append(ext_w)
+            remaining -= ext_w + 1
+
         # Path column takes the rest
         path_w = max(10, remaining)
         headers.append("Path")
@@ -2651,6 +2658,8 @@ class ESTUI:
                 header == "Modified"
                 and self.options.sort_field == SortMode.DATE_MODIFIED
             ):
+                display_header += " ↑" if self.options.sort_ascending else " ↓"
+            elif header == "Ext" and self.options.sort_field == SortMode.EXTENSION:
                 display_header += " ↑" if self.options.sort_ascending else " ↓"
             elif header == "Path" and self.options.sort_field == SortMode.PATH:
                 display_header += " ↑" if self.options.sort_ascending else " ↓"
@@ -2735,6 +2744,19 @@ class ESTUI:
                     y,
                     x_pos,
                     dt[: widths[col_i]].ljust(widths[col_i]),
+                    attr,
+                )
+                x_pos += widths[col_i] + 1
+                col_i += 1
+
+            # Extension
+            if ext_w and col_i < len(widths):
+                ext_text = getattr(r, "extension", "") or ""
+                safe_addstr(
+                    self.stdscr,
+                    y,
+                    x_pos,
+                    ext_text[: widths[col_i]].ljust(widths[col_i]),
                     attr,
                 )
                 x_pos += widths[col_i] + 1
@@ -3174,6 +3196,10 @@ class ESTUI:
         if getattr(self.options, "show_date_modified", False):
             columns.append(("Modified", "date_modified"))
 
+        # Extension column (if enabled)
+        if getattr(self.options, "show_extension", True):
+            columns.append(("Ext", "extension"))
+
         # Path column
         columns.append(("Path", "path"))
 
@@ -3213,6 +3239,8 @@ class ESTUI:
             new_sort_mode = SortMode.SIZE
         elif col_type == "date_modified":
             new_sort_mode = SortMode.DATE_MODIFIED
+        elif col_type == "extension":
+            new_sort_mode = SortMode.EXTENSION
         elif col_type == "path":
             new_sort_mode = SortMode.PATH
 
