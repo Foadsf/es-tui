@@ -1,0 +1,21 @@
+name: Local-Act (Linux Unit Tests)
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: ["**"] # prevent accidental CI spam; use workflow_dispatch or act
+
+jobs:
+  tests-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U pytest pytest-cov
+      - name: Run unit tests (Linux)
+        run: pytest tests/unit -q

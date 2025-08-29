@@ -351,26 +351,64 @@ def gather_file_properties(path: str) -> Dict[str, str]:
 
 def open_with_default_app(path: str) -> bool:
     """Open a file/folder with the OS default application. Non-blocking."""
+    # Early validation without an extra try-block
+    if not path or str(path).strip() == "":
+        logging.error("open_with_default_app(): Empty/whitespace path")
+        return False
+
     try:
         # Normalize the path and handle encoding issues
         normalized_path = os.path.normpath(path)
+        logging.debug(f"open_with_default_app(): Attempting to open: {normalized_path}")
 
         # Check if file actually exists before trying to open
         if not os.path.exists(normalized_path):
-            logging.error(f"File does not exist: {normalized_path}")
+            logging.error(
+                f"open_with_default_app(): File does not exist: {normalized_path}"
+            )
+            return False
+
+        # Check if we have read permissions
+        if not os.access(normalized_path, os.R_OK):
+            logging.error(
+                f"open_with_default_app(): No read permission for: {normalized_path}"
+            )
             return False
 
         if sys.platform.startswith("win"):
-            # On Windows, use os.startfile with proper path handling
+            logging.debug("open_with_default_app(): Using os.startfile on Windows")
             os.startfile(normalized_path)  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", normalized_path])
+            logging.debug("open_with_default_app(): Using 'open' command on macOS")
+            result = subprocess.Popen(["open", normalized_path])
+            if result.poll() is not None and result.returncode != 0:
+                logging.error(
+                    f"open_with_default_app(): 'open' failed with code {result.returncode}"
+                )
+                return False
         else:
-            subprocess.Popen(["xdg-open", normalized_path])
-        logging.debug(f"Opened with default app: {normalized_path}")
+            logging.debug("open_with_default_app(): Using 'xdg-open' on Linux")
+            result = subprocess.Popen(["xdg-open", normalized_path])
+            if result.poll() is not None and result.returncode != 0:
+                logging.error(
+                    f"open_with_default_app(): 'xdg-open' failed with code {result.returncode}"
+                )
+                return False
+
+        logging.info(
+            f"open_with_default_app(): Successfully initiated open for: {normalized_path}"
+        )
         return True
+    except OSError as e:
+        logging.error(
+            f"open_with_default_app(): OS error opening {path}: {e}", exc_info=True
+        )
+        return False
     except Exception as e:
-        logging.error(f"Open failed for {path}: {e}", exc_info=True)
+        logging.error(
+            f"open_with_default_app(): Unexpected error opening {path}: {e}",
+            exc_info=True,
+        )
         return False
 
 
@@ -1510,146 +1548,128 @@ class ESExecutor:
     def __init__(self, es_path: str = "es.exe"):
         self.es_path = es_path
 
-    def build_command(self, options: SearchOptions) -> List[str]:
-        cmd = [self.es_path]
+    def build_command(self, options: "SearchOptions") -> list[str]:
+        """
+        Build an es.exe-style command list.
+        - Preserve user regex/quotes/backslashes.
+        - Include expected columns and stable machine-readable output (-csv, -no-header).
+        - Map sort/file/folder/limit/offset/path filters.
+        """
+        cmd: list[str] = [self.es_path]
 
-        # Parse the query string to extract DOS-style switches and search terms
-        query_parts, dos_switches = self._parse_query_string(options.query)
+        # Parse query into search terms and DOS/ES-style switches
+        terms, switches = self._parse_query_string(options.query or "")
+        cmd.extend(switches)
 
-        logging.debug(f"Parsed query parts: {query_parts}")
-        logging.debug(f"Parsed DOS switches: {dos_switches}")
-
-        # Add search text (non-switch parts)
-        if query_parts:
-            cmd.extend(query_parts)
-
-        # Add DOS-style switches from query
-        cmd.extend(dos_switches)
-
-        # Use DIR-style sorting for reliability (based on test results)
-        has_sort_switch = any(
-            sw.startswith("/o") or "-sort" in sw for sw in dos_switches
-        )
-
+        # --- Sorting (prefer DIR-style flags when possible) ---
+        # Only add a sort flag if not already in switches
+        has_sort_switch = any(sw.startswith("/o") or "-sort" in sw for sw in switches)
         if not has_sort_switch:
-            if options.sort_field == SortMode.NAME:
-                sort_flag = "/on" if options.sort_ascending else "/o-n"
-            elif options.sort_field == SortMode.SIZE:
-                sort_flag = "/os" if options.sort_ascending else "/o-s"
-            elif options.sort_field == SortMode.DATE_MODIFIED:
-                sort_flag = "/od" if options.sort_ascending else "/o-d"
-            elif options.sort_field == SortMode.EXTENSION:
-                sort_flag = "/oe" if options.sort_ascending else "/o-e"
-            elif options.sort_field == SortMode.PATH:
-                # Path doesn't have a DIR-style equivalent, use -sort syntax
-                cmd.extend(["-sort", "path"])
-                if not options.sort_ascending:
-                    cmd.extend(["-sort-descending"])
-                sort_flag = None
-            elif options.sort_field == SortMode.ATTRIBUTES:
-                cmd.extend(["-sort", "attributes"])
-                if not options.sort_ascending:
-                    cmd.extend(["-sort-descending"])
-                sort_flag = None
-            else:
-                # Default to name
-                sort_flag = "/on" if options.sort_ascending else "/o-n"
+            sort_field = getattr(options, "sort_field", None)
+            sort_ascending = bool(getattr(options, "sort_ascending", True))
 
+            sort_flag = None
+            if sort_field is None or sort_field == SortMode.NAME:
+                sort_flag = "/on" if sort_ascending else "/o-n"
+            elif sort_field == SortMode.SIZE:
+                sort_flag = "/os" if sort_ascending else "/o-s"
+            elif sort_field == SortMode.DATE_MODIFIED:
+                sort_flag = "/od" if sort_ascending else "/o-d"
+            elif sort_field == SortMode.EXTENSION:
+                sort_flag = "/oe" if sort_ascending else "/o-e"
+            elif sort_field == SortMode.PATH:
+                # No DIR-style for path; use -sort
+                cmd.extend(["-sort", "path"])
+                if not sort_ascending:
+                    cmd.append("-sort-descending")
+            elif sort_field == SortMode.ATTRIBUTES:
+                cmd.extend(["-sort", "attributes"])
+                if not sort_ascending:
+                    cmd.append("-sort-descending")
             if sort_flag:
                 cmd.append(sort_flag)
-                logging.debug(f"Using DIR-style sort: {sort_flag}")
 
-        # Modes (but don't override if already specified in query)
-        if not any(sw in dos_switches for sw in ["-regex", "-r"]):
-            if options.mode == SearchMode.REGEX:
-                cmd.extend(["-regex"])
-
-        if not any(sw in dos_switches for sw in ["-case", "-i"]):
-            if options.mode == SearchMode.CASE_SENSITIVE:
-                cmd.extend(["-case"])
-
-        if not any(sw in dos_switches for sw in ["-whole-word", "-w", "-ww"]):
-            if options.mode == SearchMode.WHOLE_WORD:
-                cmd.extend(["-whole-word"])
-
-        if not any(sw in dos_switches for sw in ["-match-path", "-p"]):
-            if options.mode == SearchMode.MATCH_PATH:
-                cmd.extend(["-match-path"])
-
-        if (
-            options.match_diacritics
-            and "-diacritics" not in dos_switches
-            and "-a" not in dos_switches
+        # --- Modes (only add if not already present as switches) ---
+        if not any(sw in switches for sw in ("-regex", "-r")):
+            if getattr(options, "mode", None) == SearchMode.REGEX:
+                cmd.append("-regex")
+        if not any(sw in switches for sw in ("-case", "-i")):
+            if getattr(options, "mode", None) == SearchMode.CASE_SENSITIVE:
+                cmd.append("-case")
+        if not any(sw in switches for sw in ("-whole-word", "-w", "-ww")):
+            if getattr(options, "mode", None) == SearchMode.WHOLE_WORD:
+                cmd.append("-whole-word")
+        if not any(sw in switches for sw in ("-match-path", "-p")):
+            if getattr(options, "mode", None) == SearchMode.MATCH_PATH:
+                cmd.append("-match-path")
+        if getattr(options, "match_diacritics", False) and not any(
+            sw in switches for sw in ("-diacritics", "-a")
         ):
-            cmd.extend(["-diacritics"])
+            cmd.append("-diacritics")
 
-        # Limits / offset
-        max_results_specified = any(
-            "-max-results" in str(sw) or "-n" in str(sw) for sw in dos_switches
-        )
-        if options.max_results > 0 and not max_results_specified:
+        # --- Limits / offset ---
+        if getattr(options, "max_results", None) is not None and not any(
+            sw in switches for sw in ("-max-results", "-n")
+        ):
             cmd.extend(["-max-results", str(options.max_results)])
+        else:
+            # default cap (matches prior behavior/tests)
+            if not any(sw in switches for sw in ("-max-results", "-n")):
+                cmd.extend(["-max-results", "1000"])
 
-        offset_specified = any(
-            "-offset" in str(sw) or "-o" in str(sw) for sw in dos_switches
-        )
-        if options.offset > 0 and not offset_specified:
+        if getattr(options, "offset", None) and not any(
+            sw in switches for sw in ("-offset", "-o")
+        ):
             cmd.extend(["-offset", str(options.offset)])
 
-        # Columns - always specify these for consistent output
+        # --- Columns for consistent schema ---
         columns = ["-name"]
-        if options.show_size:
+        if getattr(options, "show_size", False):
             columns.append("-size")
-        if options.show_date_modified:
+        if getattr(options, "show_date_modified", False):
             columns.append("-date-modified")
-        if options.show_date_created:
+        if getattr(options, "show_date_created", False):
             columns.append("-date-created")
-        if options.show_date_accessed:
+        if getattr(options, "show_date_accessed", False):
             columns.append("-date-accessed")
-        if options.show_attributes:
+        if getattr(options, "show_attributes", False):
             columns.append("-attributes")
-        if options.show_extension:
+        if getattr(options, "show_extension", False):
             columns.append("-extension")
-        columns.append("-path-column")  # directory only; we'll join with name
+        columns.append("-path-column")  # dir column
         cmd.extend(columns)
 
-        # Stable machine-readable output
+        # --- Stable machine-readable output ---
         cmd.extend(["-csv", "-no-header"])
 
-        # Filters (but don't duplicate file/folder filters from query)
-        has_file_folder_filter = any(
-            sw in dos_switches for sw in ["/ad", "/a-d"]
-        ) or any(
-            "files_only" in str(sw) or "folders_only" in str(sw) for sw in dos_switches
-        )
-
+        # --- Filters ---
+        files_only = bool(getattr(options, "files_only", False))
+        folders_only = bool(getattr(options, "folders_only", False))
+        has_file_folder_filter = any(sw in switches for sw in ("/ad", "/a-d"))
         if not has_file_folder_filter:
-            if options.files_only:
-                cmd.extend(["/a-d"])
-            elif options.folders_only:
-                cmd.extend(["/ad"])
+            if files_only:
+                cmd.append("/a-d")
+            elif folders_only:
+                cmd.append("/ad")
 
-        if options.path_filter:
+        if getattr(options, "path_filter", None):
             cmd.extend(["-path", options.path_filter])
-        if options.parent_path_filter:
+        if getattr(options, "parent_path_filter", None):
             cmd.extend(["-parent-path", options.parent_path_filter])
-        if options.instance_name:
+        if getattr(options, "instance_name", None):
             cmd.extend(["-instance", options.instance_name])
 
-        # Formats
-        if options.size_format != 1:
+        # Formats (size/date) if non-defaults were requested
+        if getattr(options, "size_format", 1) != 1:
             cmd.extend(["-size-format", str(options.size_format)])
-        if options.date_format != 0:
+        if getattr(options, "date_format", 0) != 0:
             cmd.extend(["-date-format", str(options.date_format)])
 
-        # Highlight (only for console output, not CSV)
-        # if options.highlight:
-        #     cmd.extend(["-highlight"])
-
-        if options.timeout > 0:
+        if getattr(options, "timeout", 0) > 0:
             cmd.extend(["-timeout", str(options.timeout)])
 
-        logging.debug(f"Final ES command: {' '.join(cmd)}")
+        # Finally, append search terms (preserve quotes/backslashes)
+        cmd.extend(terms)
         return cmd
 
     def _winsearch_script_path(self) -> str:
@@ -1717,59 +1737,92 @@ class ESExecutor:
         err_msg = es_err or ws_err
         return combined, err_msg
 
-    def _parse_query_string(self, query: str) -> Tuple[List[str], List[str]]:
-        """Parse query string to separate search terms from DOS-style switches.
-
-        Returns:
-            Tuple of (search_terms, switches)
+    def _parse_query_string(self, query: str) -> tuple[list[str], list[str]]:
+        """
+        Split a query string into (search_terms, switches) without stripping quotes
+        or escaping backslashes. Quoted phrases remain quoted. Only switches that
+        are known to take an argument will consume the following token.
         """
         if not query:
             return [], []
 
-        import shlex
+        import re
 
-        try:
-            # Split respecting quotes
-            tokens = shlex.split(query)
-        except ValueError:
-            # Fall back to simple split if shlex fails
-            tokens = query.split()
+        tokens = re.findall(r'"[^"]*"|\S+', query)
 
-        search_terms = []
-        switches = []
+        # Switches that accept a single argument token
+        takes_arg = {
+            "-sort",
+            "-max-results",
+            "-n",
+            "-offset",
+            "-o",
+            "-path",
+            "-parent-path",
+            "-instance",
+            "-size-format",
+            "-date-format",
+            "-timeout",
+            "-highlight-color",
+            # width/color variants (keep generous to avoid false negatives)
+            "-filename-width",
+            "-name-width",
+            "-path-width",
+            "-extension-width",
+            "-size-width",
+            "-date-created-width",
+            "-dc-width",
+            "-date-modified-width",
+            "-dm-width",
+            "-date-accessed-width",
+            "-da-width",
+            "-attributes-width",
+            "-run-count-width",
+            "-date-run-width",
+            "-date-recently-changed-width",
+            "-rc-width",
+            "-filename-color",
+            "-name-color",
+            "-path-color",
+            "-extension-color",
+            "-size-color",
+            "-date-created-color",
+            "-dc-color",
+            "-date-modified-color",
+            "-dm-color",
+            "-date-accessed-color",
+            "-da-color",
+            "-attributes-color",
+            "-run-count-color",
+            "-date-run-color",
+            "-date-recently-changed-color",
+            "-rc-color",
+        }
 
+        terms: list[str] = []
+        switches: list[str] = []
         i = 0
         while i < len(tokens):
-            token = tokens[i]
-
-            # DOS-style switches
-            if token.startswith("/"):
-                switches.append(token)
-            # Unix-style switches
-            elif token.startswith("-"):
-                switches.append(token)
-                # Check if this switch takes an argument
-                if token in [
-                    "-sort",
-                    "-max-results",
-                    "-n",
-                    "-offset",
-                    "-o",
-                    "-path",
-                    "-parent-path",
-                    "-instance",
-                    "-size-format",
-                    "-date-format",
-                    "-timeout",
-                ] and i + 1 < len(tokens):
+            t = tokens[i]
+            if t.startswith("-") or t.startswith("/"):
+                switches.append(t)
+                # Only attach the next token if this switch takes an argument
+                if (
+                    t in takes_arg
+                    and i + 1 < len(tokens)
+                    and not (
+                        tokens[i + 1].startswith("-") or tokens[i + 1].startswith("/")
+                    )
+                ):
+                    switches.append(tokens[i + 1])
                     i += 1
-                    switches.append(tokens[i])
             else:
-                # Regular search term
-                search_terms.append(token)
+                terms.append(t)
             i += 1
 
-        return search_terms, switches
+        # Drop whitespace-only tokens (quoted phrases are preserved)
+        terms = [t for t in terms if t.strip()]
+        return terms, switches
 
     def execute_search(self, options: SearchOptions) -> Tuple[List[SearchResult], str]:
         # First try ES sorting
@@ -3477,55 +3530,108 @@ class ESTUI:
 
     def _sort_by_column(self, columns):
         """Sort results by the currently selected column"""
-        if self.current_header_col >= len(columns):
-            return
-
-        _, col_type = columns[self.current_header_col]
-
-        logging.debug(f"Sorting by column: {col_type}")
-
-        # Determine new sort mode
-        new_sort_mode = None
-        if col_type == "icon":
-            # Sort by extension since we can't sort by file type
-            new_sort_mode = SortMode.EXTENSION
-            logging.debug("Icon column - sorting by file extension instead")
-        elif col_type == "name":
-            new_sort_mode = SortMode.NAME
-        elif col_type == "size":
-            new_sort_mode = SortMode.SIZE
-        elif col_type == "date_modified":
-            new_sort_mode = SortMode.DATE_MODIFIED
-        elif col_type == "extension":
-            new_sort_mode = SortMode.EXTENSION
-        elif col_type == "path":
-            new_sort_mode = SortMode.PATH
-
-        if new_sort_mode is None:
-            logging.debug(f"Unknown column type for sorting: {col_type}")
-            return
-
-        logging.debug(
-            f"Current sort field: {self.options.sort_field}, New sort mode: {new_sort_mode}"
-        )
-
-        # Toggle sort order if same column, otherwise default to ascending
-        if self.options.sort_field == new_sort_mode:
-            self.options.sort_ascending = not self.options.sort_ascending
-            logging.debug(
-                f"Toggling sort order to: {'ascending' if self.options.sort_ascending else 'descending'}"
+        try:
+            logging.info(
+                f"_sort_by_column(): Attempting to sort by column {self.current_header_col}"
             )
-        else:
-            self.options.sort_field = new_sort_mode
-            self.options.sort_ascending = True
-            logging.debug(f"Changing sort field to: {new_sort_mode.value} ascending")
 
-        logging.debug(
-            f"Final sort: {self.options.sort_field.value} {'ascending' if self.options.sort_ascending else 'descending'}"
-        )
+            if self.current_header_col >= len(columns):
+                self.status_message = "Invalid column selection for sorting"
+                self._ui_dirty = True
+                logging.error(
+                    f"_sort_by_column(): Column index {self.current_header_col} out of range (max: {len(columns) - 1})"
+                )
+                return
 
-        # Re-run the search with new sort parameters
-        self.perform_search()
+            if not columns or len(columns) == 0:
+                self.status_message = "No columns available for sorting"
+                self._ui_dirty = True
+                logging.error("_sort_by_column(): No columns provided")
+                return
+
+            column_header, col_type = columns[self.current_header_col]
+            logging.info(
+                f"_sort_by_column(): Selected column '{column_header}' (type: {col_type})"
+            )
+
+            # Determine new sort mode
+            new_sort_mode = None
+            user_friendly_name = ""
+
+            if col_type == "icon":
+                # Sort by extension since we can't sort by file type directly
+                new_sort_mode = SortMode.EXTENSION
+                user_friendly_name = "file extension"
+                logging.info(
+                    "_sort_by_column(): Icon column selected - sorting by file extension instead"
+                )
+            elif col_type == "name":
+                new_sort_mode = SortMode.NAME
+                user_friendly_name = "name"
+            elif col_type == "size":
+                new_sort_mode = SortMode.SIZE
+                user_friendly_name = "size"
+            elif col_type == "date_modified":
+                new_sort_mode = SortMode.DATE_MODIFIED
+                user_friendly_name = "date modified"
+            elif col_type == "extension":
+                new_sort_mode = SortMode.EXTENSION
+                user_friendly_name = "extension"
+            elif col_type == "path":
+                new_sort_mode = SortMode.PATH
+                user_friendly_name = "path"
+
+            if new_sort_mode is None:
+                self.status_message = f"Cannot sort by '{column_header}' column"
+                self._ui_dirty = True
+                logging.error(
+                    f"_sort_by_column(): Unknown/unsupported column type for sorting: {col_type}"
+                )
+                return
+
+            logging.info(
+                f"_sort_by_column(): Current sort: {self.options.sort_field.value}, New sort: {new_sort_mode.value}"
+            )
+
+            # Toggle sort order if same column, otherwise default to ascending
+            if self.options.sort_field == new_sort_mode:
+                self.options.sort_ascending = not self.options.sort_ascending
+                sort_direction = (
+                    "ascending" if self.options.sort_ascending else "descending"
+                )
+                logging.info(
+                    f"_sort_by_column(): Toggling sort order to: {sort_direction}"
+                )
+                self.status_message = (
+                    f"Sorting by {user_friendly_name} ({sort_direction})"
+                )
+            else:
+                self.options.sort_field = new_sort_mode
+                self.options.sort_ascending = True
+                logging.info(
+                    f"_sort_by_column(): Changing sort field to: {new_sort_mode.value} ascending"
+                )
+                self.status_message = f"Sorting by {user_friendly_name} (ascending)"
+
+            # Check if we have results to sort
+            if not self.results:
+                self.status_message = "No results to sort"
+                self._ui_dirty = True
+                logging.warning("_sort_by_column(): No results available to sort")
+                return
+
+            logging.info(
+                f"_sort_by_column(): Final sort configuration: {self.options.sort_field.value} {'ascending' if self.options.sort_ascending else 'descending'}"
+            )
+
+            # Re-run the search with new sort parameters
+            self.perform_search()
+
+        except Exception as e:
+            self.status_message = f"Sort failed: {str(e)}"
+            self._ui_dirty = True
+            logging.error(f"_sort_by_column(): Exception occurred: {e}", exc_info=True)
+            self.draw_interface()
 
     def perform_search(self):
         """Execute search in a separate thread"""
@@ -3758,34 +3864,227 @@ class ESTUI:
             if not self.results:
                 self.status_message = "No results to open"
                 self._ui_dirty = True
+                logging.info("open_selected(): No results available")
                 return
 
             idx = max(0, min(self.current_result, len(self.results) - 1))
             sel = self.results[idx]
             path = getattr(sel, "full_path", None) or getattr(sel, "path", None) or ""
 
+            logging.info(f"open_selected(): Attempting to open result {idx}: '{path}'")
+
             if not path:
-                self.status_message = "Internal error: no path for selection"
+                self.status_message = "Error: No path for selection"
                 self._ui_dirty = True
+                self.draw_interface()  # Add this line
+                logging.error("open_selected(): Selected result has no path attribute")
                 return
 
-            # Check if file exists before attempting to open
-            if not os.path.exists(path):
-                self.status_message = f"File not found: {os.path.basename(path)}"
+            # Detect and handle non-filesystem paths first
+            if self._is_non_filesystem_path(path):
+                path_type = self._get_path_type_description(path)
+                self.status_message = f"Cannot open: {path_type}"
                 self._ui_dirty = True
-                logging.warning(f"File not found when trying to open: {path}")
+                self.draw_interface()  # Add this line
+                logging.warning(
+                    f"open_selected(): Non-filesystem path detected: '{path}' ({path_type})"
+                )
                 return
 
-            ok = open_with_default_app(path)
-            base = os.path.basename(path.rstrip("\\/"))
-            self.status_message = f"Opened: {base}" if ok else f"Open failed: {base}"
+            # Clean and normalize the path
+            normalized_path = self._clean_and_normalize_path(path)
+            logging.debug(
+                f"open_selected(): Cleaned path: '{path}' -> '{normalized_path}'"
+            )
+
+            # Check if file exists
+            if not os.path.exists(normalized_path):
+                self.status_message = (
+                    f"File not found: {os.path.basename(normalized_path)}"
+                )
+                self._ui_dirty = True
+                self.draw_interface()  # Add this line
+                logging.warning(f"open_selected(): File not found: '{normalized_path}'")
+                self._log_file_diagnostics(normalized_path, path)
+                return
+
+            # Check permissions
+            if not os.access(normalized_path, os.R_OK):
+                self.status_message = (
+                    f"No permission: {os.path.basename(normalized_path)}"
+                )
+                self._ui_dirty = True
+                self.draw_interface()  # Add this line
+                logging.error(
+                    f"open_selected(): No read permission: '{normalized_path}'"
+                )
+                return
+
+            # Attempt to open
+            logging.info(f"open_selected(): Opening file: '{normalized_path}'")
+            success = open_with_default_app(normalized_path)
+
+            base_name = os.path.basename(normalized_path.rstrip("\\/"))
+            if success:
+                self.status_message = f"Opened: {base_name}"
+                logging.info(
+                    f"open_selected(): Successfully opened: '{normalized_path}'"
+                )
+            else:
+                self.status_message = f"Failed to open: {base_name}"
+                logging.error(f"open_selected(): Failed to open: '{normalized_path}'")
+
         except Exception as e:
-            logging.error(f"open_selected() failed: {e}", exc_info=True)
-            self.status_message = "Open failed (see log)"
+            self.status_message = f"Open error: {str(e)}"
+            logging.error(f"open_selected(): Exception: {e}", exc_info=True)
         finally:
-            # Ensure UI refreshes even if no key was pressed after Enter
             self._ui_dirty = True
             self.draw_interface()
+
+    def _attempt_path_recovery(
+        self, normalized_path: str, original_path: str
+    ) -> Optional[str]:
+        """Attempt to recover the correct path when the constructed path is invalid."""
+        try:
+            parent_dir = os.path.dirname(normalized_path)
+
+            # Check if parent is actually a file (es_winsearch.py path construction bug)
+            if parent_dir and os.path.isfile(parent_dir):
+                logging.info(
+                    f"_attempt_path_recovery(): Parent is file, using as target: '{parent_dir}'"
+                )
+                return parent_dir
+
+            # Check for duplicate filename pattern (file.ext\file.ext)
+            parts = normalized_path.split(os.path.sep)
+            if len(parts) >= 2 and parts[-1] == parts[-2]:
+                recovered = os.path.sep.join(parts[:-1])
+                if os.path.exists(recovered):
+                    logging.info(
+                        f"_attempt_path_recovery(): Removed duplicate filename: '{recovered}'"
+                    )
+                    return recovered
+
+            return None
+
+        except Exception as e:
+            logging.debug(f"_attempt_path_recovery(): Failed: {e}")
+            return None
+
+    def _clean_and_normalize_path(self, path: str) -> str:
+        """Clean and normalize file path, handling common issues."""
+        try:
+            # Remove any null characters or control characters
+            cleaned = "".join(char for char in path if ord(char) >= 32)
+
+            # Handle the specific es_winsearch.py double-path issue
+            # Pattern: C:\path\file.ext\file.ext -> C:\path\file.ext
+            if os.path.sep in cleaned:
+                parts = cleaned.split(os.path.sep)
+                if len(parts) >= 2 and parts[-1] == parts[-2]:
+                    # Last two parts are identical, remove the last one
+                    cleaned = os.path.sep.join(parts[:-1])
+                    logging.info(
+                        f"_clean_and_normalize_path(): Fixed duplicate filename: '{path}' -> '{cleaned}'"
+                    )
+
+            # Handle encoding issues on Windows
+            if sys.platform.startswith("win") and "Ã" in cleaned:
+                try:
+                    # Try to fix UTF-8 misinterpreted as Latin-1
+                    fixed = cleaned.encode("latin-1").decode("utf-8", errors="ignore")
+                    if os.path.exists(fixed):
+                        cleaned = fixed
+                        logging.debug(
+                            f"_clean_and_normalize_path(): Fixed encoding: '{path}' -> '{cleaned}'"
+                        )
+                except (UnicodeError, UnicodeDecodeError):
+                    pass
+
+            # Normalize path separators and resolve any relative components
+            normalized = os.path.normpath(cleaned)
+
+            return normalized
+
+        except Exception as e:
+            logging.warning(
+                f"_clean_and_normalize_path(): Failed to clean path '{path}': {e}"
+            )
+            return path
+
+    def _log_file_diagnostics(self, normalized_path: str, original_path: str):
+        """Log diagnostic information when file is not found."""
+        try:
+            parent_dir = os.path.dirname(normalized_path)
+
+            logging.info(f"open_selected(): File diagnostics for '{normalized_path}':")
+            logging.info(f"  Original path: '{original_path}'")
+            logging.info(f"  Parent directory: '{parent_dir}'")
+            logging.info(
+                f"  Parent exists: {os.path.exists(parent_dir) if parent_dir else 'N/A'}"
+            )
+
+            # Check if parent is actually a file (common with es_winsearch.py issues)
+            if parent_dir and os.path.isfile(parent_dir):
+                logging.info(
+                    f"  Parent is actually a file! This suggests path construction error."
+                )
+                # Check if parent file exists and is the actual target
+                if os.path.exists(parent_dir):
+                    logging.info(
+                        f"  Suggested fix: Use parent as target file: '{parent_dir}'"
+                    )
+
+            # List files in parent directory if it exists and is a directory
+            if parent_dir and os.path.isdir(parent_dir):
+                try:
+                    files = os.listdir(parent_dir)[:10]  # First 10 files
+                    logging.debug(f"  Files in parent directory: {files}")
+                except Exception as list_err:
+                    logging.debug(f"  Could not list parent directory: {list_err}")
+
+        except Exception as diag_err:
+            logging.debug(f"_log_file_diagnostics(): Failed: {diag_err}")
+
+    def _is_non_filesystem_path(self, path: str) -> bool:
+        """Check if path represents a non-filesystem location (email, etc.)."""
+        if not path:
+            return True
+
+        # Email paths (Outlook, Exchange, etc.)
+        if (
+            path.startswith("/")
+            and "@" in path
+            and any(
+                keyword in path
+                for keyword in ["Sent Items", "Inbox", "Drafts", "Deleted Items"]
+            )
+        ):
+            return True
+
+        # SharePoint or other virtual paths
+        if path.startswith("http://") or path.startswith("https://"):
+            return True
+
+        # Paths with email-like components that aren't real directories
+        if "@" in path and not os.path.exists(os.path.dirname(path)):
+            return True
+
+        return False
+
+    def _get_path_type_description(self, path: str) -> str:
+        """Get human-readable description of the path type."""
+        if "@" in path and any(
+            keyword in path
+            for keyword in ["Sent Items", "Inbox", "Drafts", "Deleted Items"]
+        ):
+            return "Email attachment (open via Outlook)"
+        elif path.startswith("http://") or path.startswith("https://"):
+            return "Web URL (use browser to open)"
+        elif "@" in path:
+            return "Virtual path (not directly accessible)"
+        else:
+            return "Non-standard path format"
 
 
 def main():
