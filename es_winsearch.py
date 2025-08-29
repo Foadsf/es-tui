@@ -78,11 +78,37 @@ def size_fmt(n: Optional[int], mode: int) -> str:
 
 
 def to_file_uri(path: str) -> str:
-    # Windows Search expects scope like: file:C:\Path\
-    path = os.path.abspath(path)
-    if not path.endswith("\\"):
-        path += "\\"
-    return f"file:{path}"
+    """Return a file: URI string understood by Windows Search SCOPE=.
+
+    Windows-style:
+      - If drive-letter/UNC -> keep as-is, ensure trailing backslash.
+      - If relative with backslashes -> absolutize via os.path.abspath, ensure trailing backslash.
+
+    Non-Windows paths fall back to absolute POSIX path.
+    """
+    if not path:
+        return "file:"
+
+    def _ensure_trailing_backslash(p: str) -> str:
+        return p if p.endswith("\\") else p + "\\"
+
+    is_drive = len(path) >= 2 and path[1:2] == ":"
+    is_unc = path.startswith("\\\\")
+    has_backslash = "\\" in path
+
+    if is_drive or is_unc:
+        p = _ensure_trailing_backslash(path)
+        return "file:" + p
+
+    # Windows-looking but relative (e.g., "relative\\path")
+    if has_backslash and not is_drive and not is_unc:
+        abs_p = os.path.abspath(path)
+        abs_p = _ensure_trailing_backslash(abs_p)
+        return "file:" + abs_p
+
+    # Non-Windows path: resolve to absolute (no trailing slash change)
+    abs_p = os.path.abspath(path)
+    return "file:" + abs_p
 
 
 def parse_es_style_args(argv: List[str]) -> Tuple[Dict[str, Any], List[str]]:

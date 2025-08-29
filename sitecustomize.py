@@ -1,5 +1,5 @@
-# makes 'tests' importable for tests.helpers.*
-# Ensure os.startfile exists on non-Windows so tests can patch it.
+# Auto-imported by Python if found on sys.path.
+# Provide os.startfile on non-Windows so unit tests can patch it.
 import os
 
 if not hasattr(os, "startfile"):
